@@ -1,0 +1,1 @@
+A custom Redis-like storage server built from the ground up using C standard libraries. It leverages an instance-based Skip List architecture to provide ordered data storage, designed specifically to serve as the state-management layer for distributed systems.
