@@ -1,0 +1,7 @@
+.history/
+.vscode/
+*.dSYM/
+*.o
+
+# Standard OS junk
+.DS_Store
