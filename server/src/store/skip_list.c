@@ -1,4 +1,4 @@
-#include "skip_list.h"
+#include "store/skip_list.h"
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
