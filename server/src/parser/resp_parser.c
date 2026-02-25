@@ -8,6 +8,7 @@ int advance(char *buff, size_t buff_len, size_t *cursor, char search);
 int advance_till_delimeter(char *buff, size_t buff_len, size_t *cursor);
 int parse_int(char *buff, size_t start, size_t len, ssize_t *out);
 int consume_delimiter(char *buff, size_t *cursor, size_t buff_len);
+void free_command(struct RedisCommand *cmd);
 enum ParseResult parse_bulk_string(char *buff, size_t *cursor, size_t bytes_to_read, struct BulkString *out);
 // HELPER PROTOTYPES END
 
@@ -19,6 +20,8 @@ int parse_array_command(char *buff, size_t buff_len, struct RedisCommand *out){
     ssize_t array_len;
     ssize_t len = tmp_cursor-start;
     if(!parse_int(buff, start, len, &array_len)){ return 0; }
+    
+    // We still need to allocate the array of BulkString headers to hold our "views"
     struct BulkString *strings = calloc(array_len, sizeof(struct BulkString));
     if(strings == NULL){ return -1;}
     out->args = strings;
@@ -126,13 +129,23 @@ int consume_delimiter(char *buff, size_t *cursor, size_t buff_len){
     return 0;
 }
 
+// Operates on pointers into the buffer (Zero-Copy)
 enum ParseResult parse_bulk_string(char *buff, size_t *cursor, size_t bytes_to_read, struct BulkString *out){
-    void *data = malloc(bytes_to_read);
-    if(data == NULL){ return PARSE_ERR; }
-    
-    memcpy(data, buff + *cursor, bytes_to_read);
+    out->data = buff + *cursor;
     out->len = bytes_to_read;
-    out->data = data;
     *cursor += bytes_to_read;   // move cursor to end
     return PARSE_OK;
+}
+
+void free_command(struct RedisCommand *cmd) {
+    if (cmd == NULL) {
+        return;
+    }
+
+    if (cmd->args != NULL) {
+        free(cmd->args);
+        cmd->args = NULL;
+    }
+
+    cmd->arg_count = 0;
 }

@@ -29,14 +29,9 @@ struct BulkString{
     size_t len;
 };
 
-void *get_in_addr(struct sockaddr *sa)
-{
-    if (sa->sa_family == AF_INET) {
-        return &(((struct sockaddr_in*)sa)->sin_addr);
-    }
-
-    return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
+// Prototype
+void handle_client(int clientfd, struct InputBuffer *ib);
+void *get_in_addr(struct sockaddr *sa);
 
 int main(void){
     int serverfd, clientfd;
@@ -96,7 +91,7 @@ int main(void){
 
     printf("server: waiting for connections on port %s\n", PORT);
 
-    while(1) {  // listening loop
+    while(1) {  // accept loop
         sin_size = sizeof client_addr;
         clientfd = accept(serverfd, (struct sockaddr*) &client_addr, &sin_size);
 
@@ -108,62 +103,79 @@ int main(void){
         inet_ntop(client_addr.ss_family, get_in_addr((struct sockaddr *) &client_addr), s, sizeof s);
         printf("server: got connection from %s\n", s);
 
-        while(1){
-            if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
-                // try removing used data
-                size_t remaining = ib->used - ib->read_idx;
-                memmove(ib->data, ib->data + ib->read_idx, remaining);    
-                ib->read_idx = 0;
-                ib->used = remaining;
-                // still need more -> expand buffer
-                if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
-                    if(!expand_buffer(ib)){
-                        printf("Error expanding buffer");
-                        exit(1);
-                    }
-                }
-            }
+        handle_client(clientfd, ib);
 
-            ssize_t n = recv(clientfd, ib->data + ib->used, ib->capacity - ib->used, 0);
-            if(n == 0) {    // client closed
-                break;
-            } else if (n < 0) { // error
-                if(errno == EINTR){continue;}
-                perror("recv");
-                break;
-            }
-
-            ib->used += n;
-          
-            while(ib->read_idx < ib->used){
-                if(ib->data[ib->read_idx] == '*'){   
-                    struct RedisCommand command;
-                    char *start_buff = ib->data + ib->read_idx;
-                    size_t buff_len = ib->used - ib->read_idx;
-                    int consumed = parse_array_command(start_buff, buff_len, &command);
-                    if(consumed == 0){
-                        break;
-                    } else if(consumed < 0){
-                        printf("Parsing error. server shutting down.");
-                        exit(1);
-                    }
-                    
-                    enum ParseResult res = execute_command(clientfd, command);
-                    if(res == EXECUTE_ERR){
-                        printf("Parsing error. server shutting down.");
-                        exit(1);
-                    }
-                    ib->read_idx += consumed;
-                    free_command(&command);
-                } else {
-                    // send protocol error.
-                    break;
-                }
-            }
-            
-        }
+        // Connection cleanup
         ib->read_idx = 0;
         ib->used = 0;
         close(clientfd);
     }
 }
+
+
+void *get_in_addr(struct sockaddr *sa){
+ if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in*)sa)->sin_addr);
+    }
+
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+void handle_client(int clientfd, struct InputBuffer *ib) {
+    while(1){   // recv loop
+        if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
+            // try removing used data
+            size_t remaining = ib->used - ib->read_idx;
+            memmove(ib->data, ib->data + ib->read_idx, remaining);    
+            ib->read_idx = 0;
+            ib->used = remaining;
+            // still need more -> expand buffer
+            if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
+                if(!expand_buffer(ib)){
+                    printf("Error expanding buffer");
+                    exit(1);
+                }
+            }
+        }
+
+        ssize_t n = recv(clientfd, ib->data + ib->used, ib->capacity - ib->used, 0);
+        if(n == 0) {    // client closed
+            return;
+        } else if (n < 0) { // error
+            if(errno == EINTR){continue;}
+            perror("recv");
+            return;
+        }
+
+        ib->used += n;
+      
+        while(ib->read_idx < ib->used){     // parsing loop
+            if(ib->data[ib->read_idx] == '*'){   
+                struct RedisCommand command;
+                char *start_buff = ib->data + ib->read_idx;
+                size_t buff_len = ib->used - ib->read_idx;
+                int consumed = parse_array_command(start_buff, buff_len, &command);
+                if(consumed == 0){
+                    break;
+                } else if(consumed < 0){
+                    printf("Parsing error. ");
+                    //send error back
+                    return;
+                }
+                
+                enum ParseResult res = execute_command(clientfd, command);
+                if(res == EXECUTE_ERR){
+                    printf("Parsing error. server shutting down.");
+                    exit(1);
+                }
+                ib->read_idx += consumed;
+                free_command(&command);
+            } else {
+                // send error
+                return;
+            }
+        }
+    }
+}
+
+   
