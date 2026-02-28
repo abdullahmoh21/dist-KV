@@ -13,6 +13,7 @@ typedef enum {
 typedef struct RedisObject {
     RS_ObjType type; 
     char *key;       
+    size_t key_len;
     void *data;    // either KV value or pointer to ZSet  
     size_t data_len;
 } RedisObject;
@@ -23,7 +24,8 @@ typedef struct Zset {
 } Zset;
 
 typedef struct ZSetMember {
-    char *member;
+    char *key;
+    size_t key_len;
     double score;
 } ZSetMember;
 

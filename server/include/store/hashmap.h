@@ -27,8 +27,13 @@ typedef struct HashMap {
     HashNode **buckets;
     size_t size;
     size_t item_count; 
-    const char* (*get_key)(void *val);
+    const KeyView (*get_key)(void *val);
 } HashMap;
+
+typedef struct {
+    const char *data;
+    size_t len;
+} KeyView;
 
 typedef enum {
     HM_OK,
@@ -38,9 +43,10 @@ typedef enum {
     HM_ERR
 } HM_RESULT;
 
-HashMap* hm_create(const char* (*get_key_fn)(void *));
+
+HashMap* hm_create(const KeyView (*get_key_fn)(void *));
 HM_RESULT hm_insert(HashMap *hm, void *val);
-HM_RESULT hm_get(HashMap *hm, char *key, void **out);
-HM_RESULT hm_delete(HashMap *hm, char *key, void **out);
-HM_RESULT hm_free(HashMap *hm);
+HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out);
+HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out);
+HM_RESULT hm_free_shallow(HashMap *hm);
 #endif

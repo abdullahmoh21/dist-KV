@@ -20,4 +20,7 @@ typedef struct RedisStore {
     HashMap *dict;
 } RedisStore;
 
+typedef struct RS_ZIterator{
+    SkipListIterator internal_it;
+} RS_ZIterator;
 #endif

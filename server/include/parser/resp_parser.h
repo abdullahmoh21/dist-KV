@@ -14,15 +14,15 @@ enum ParseResult {
     PARSE_ERR 
 };
 
-struct BulkString {
-    void *data;
+typedef struct BulkString {
+    const char *data;
     size_t len;
-};
+} BulkString;
 
-struct RedisCommand {
+typedef struct RedisCommand {
     struct BulkString *args;
     size_t arg_count;
-};
+} RedisCommand;
 
 /* Function Prototypes */
 int parse_array_command(char *buff, size_t buff_len, struct RedisCommand *out);
