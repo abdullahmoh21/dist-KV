@@ -21,7 +21,7 @@ typedef struct BulkString {
 
 typedef struct RedisCommand {
     struct BulkString *args;
-    size_t arg_count;
+    int arg_count;
 } RedisCommand;
 
 /* Function Prototypes */

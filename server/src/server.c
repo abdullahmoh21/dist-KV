@@ -1,3 +1,9 @@
+#include "store/buffer.h"
+#include "store/skip_list.h"
+#include "store/hashmap.h"
+#include "store/redis_store.h"
+#include "engine/execution_engine.h"
+#include "parser/resp_parser.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -8,29 +14,14 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <buffer.h>
 
 #define PORT "6379"
 #define BACKLOG 10
 #define INITIAL_BUFF_CAPACITY 4096
 #define EXPANSION_THRESH 10
 
-enum ParseResult { PARSE_OK, PARSE_NEED_MORE, PARSE_ERR };
-enum ExecuteStatus { EXECUTE_OK, EXECUTE_ERR };
-enum CommandType { REDIS_GET, REDIS_PUT};
-struct RedisCommand {
-    enum CommandType type;
-    struct BulkString *args;
-    size_t arg_count;
-};
-
-struct BulkString{
-    void *data;
-    size_t len;
-};
-
 // Prototype
-void handle_client(int clientfd, struct InputBuffer *ib);
+void handle_client(int clientfd, struct Buffer *ib, RedisStore *store);
 void *get_in_addr(struct sockaddr *sa);
 
 int main(void){
@@ -40,11 +31,17 @@ int main(void){
     socklen_t sin_size;
     int yes=1;
     char s[INET6_ADDRSTRLEN];
-    struct InputBuffer *ib = malloc(sizeof(struct InputBuffer));
+    struct Buffer *ib = malloc(sizeof(struct Buffer));
     ib->data = calloc(INITIAL_BUFF_CAPACITY, sizeof(char));
     ib->capacity = INITIAL_BUFF_CAPACITY;
     ib->used = 0;
     int rv;
+
+    RedisStore store;
+    if(create_store(&store) != RS_OK){
+        fprintf(stderr, "Failed to create Redis store\n");
+        return 1;
+    }
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
@@ -103,7 +100,7 @@ int main(void){
         inet_ntop(client_addr.ss_family, get_in_addr((struct sockaddr *) &client_addr), s, sizeof s);
         printf("server: got connection from %s\n", s);
 
-        handle_client(clientfd, ib);
+        handle_client(clientfd, ib, &store);
 
         // Connection cleanup
         ib->read_idx = 0;
@@ -121,7 +118,7 @@ void *get_in_addr(struct sockaddr *sa){
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-void handle_client(int clientfd, struct InputBuffer *ib) {
+void handle_client(int clientfd, struct Buffer *ib, RedisStore *store) {
     while(1){   // recv loop
         if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
             // try removing used data
@@ -163,8 +160,8 @@ void handle_client(int clientfd, struct InputBuffer *ib) {
                     return;
                 }
                 
-                enum ParseResult res = execute_command(clientfd, command);
-                if(res == EXECUTE_ERR){
+                ExecuteResult res = execute_command(clientfd, &command, store);
+                if(res == EE_ERR){
                     printf("Parsing error. server shutting down.");
                     exit(1);
                 }

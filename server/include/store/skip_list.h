@@ -36,8 +36,8 @@ typedef enum {
 SkipList* sl_create(int max_lvl);
 SL_RESULT sl_insert(SkipList *list, ZSetMember *obj);
 ZSetMember* sl_search(SkipList *list, char *member, size_t member_len, double score);
-ZSetMember* sl_update(SkipList *list, char *member,size_t member_len, double new_score);
-SL_RESULT sl_delete(SkipList *list, char *member, size_t member_len, double score);
+SL_RESULT sl_update(SkipList *list, char *member, size_t member_len, double old_score, double new_score);
+SL_RESULT sl_delete(SkipList *list, const char *member, size_t member_len, double score);
 SkipListIterator sl_iterator_score(SkipList *list, double start, double end);
 SkipListIterator sl_iterator_rank(SkipList *list, long start, long end);
 SL_RESULT sl_free_shallow(SkipList *list);

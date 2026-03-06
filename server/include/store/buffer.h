@@ -10,13 +10,13 @@ enum ExpansionStatus {
     EXPANSION_MAX_EXCEEDED,
 };
 
-struct InputBuffer {
+struct Buffer {
     char *data;
     size_t capacity;
     size_t used;        // end of data. where recv writes
     size_t read_idx;    // start of data. where parser starts
 };
 
-enum ExpansionStatus expand_buffer(struct InputBuffer *ib);
+enum ExpansionStatus expand_buffer(struct Buffer *ib);
 
 #endif

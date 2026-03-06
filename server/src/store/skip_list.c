@@ -1,4 +1,5 @@
 #include "store/skip_list.h"
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -190,7 +191,7 @@ SL_RESULT sl_update(SkipList *list, char *member, size_t member_len, double old_
     return SL_OK;
 }
 
-SL_RESULT sl_delete(SkipList *list, char *member, size_t member_len, double score){
+SL_RESULT sl_delete(SkipList *list, const char *member, size_t member_len, double score){
     if(list == NULL || list->head == NULL){
         return SL_UNINITIALIZED;
     }
@@ -226,14 +227,45 @@ SL_RESULT sl_delete(SkipList *list, char *member, size_t member_len, double scor
     return SL_DELETED;
 } 
 
-SkipListIterator* sl_iterator_score(SkipList *list, double start, long end){
-
+SkipListIterator sl_iterator_score(SkipList *list, double start, double end){
+    SkipListIterator it = {.current = NULL, .max = -1};
+    if (list == NULL || list->head == NULL) return it;
+    
+    // Find first node >= start
+    SkipListNode *current = list->head;
+    for(int i = list->max_lvl - 1; i >= 0; i--) {
+        while(current->forward[i] != NULL && current->forward[i]->obj->score < start) {
+            current = current->forward[i];
+        }
+    }
+    it.current = current->forward[0];  // First node >= start
+    return it;
 }
 
-SkipListIterator* sl_iterator_rank(SkipList *list, long start, long end);
+SkipListIterator sl_iterator_rank(SkipList *list, long start, long end){
+    SkipListIterator it = {.current = NULL, .max = end};
+    if (list == NULL || list->head == NULL) return it;
+    
+    SkipListNode *current = list->head->forward[0];
+    long rank = 0;
+    
+    // Skip to start position
+    while(current != NULL && rank < start) {
+        current = current->forward[0];
+        rank++;
+    }
+    
+    it.current = current;
+    return it;
+}
 
 int sl_next(SkipListIterator *it){
-
+    if (it == NULL || it->current == NULL) return 0;
+    
+    it->current = it->current->forward[0];
+    
+    if (it->current == NULL) return 0;
+    return 1;
 }
 
 SL_RESULT sl_free_shallow(SkipList *list){
@@ -265,7 +297,6 @@ static int _random_lvl(SkipList *list){
     }
     return lvl;
 }
-
 
 // AI-GEN pretty printer updated for ZSetMember 
 static void _print_skiplist(SkipList *list) {

@@ -1,11 +1,17 @@
 #include "store/hashmap.h"
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
+// Helper prototypes
+static size_t _hash_key(const char *key, size_t key_len, size_t idx_space_len);
+static HM_RESULT _update_buffer_size(HashMap *hm);
+static HM_RESULT _rehash(HashMap *hm, size_t new_size);
 
-HashMap* hm_create(const char* (*get_key_fn)(void *)){
+
+HashMap* hm_create(const KeyView (*get_key_fn)(void *)){
     HashMap *hm = malloc(sizeof(HashMap));
     if(hm == NULL) {return NULL;}
     HashNode **buckets = calloc(DEFAULT_SIZE, sizeof(HashNode*));
@@ -54,7 +60,7 @@ HM_RESULT hm_insert(HashMap *hm, void *val) {
     return HM_OK;
 }
 
-HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out){
+HM_RESULT hm_get(HashMap *hm, const char *key, size_t key_len, void **out){
     size_t idx = _hash_key(key, key_len, hm->size);
     if(hm->buckets[idx] == NULL){
         return HM_NOT_FOUND;
@@ -72,7 +78,7 @@ HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out){
     }
 }
 
-HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out){
+HM_RESULT hm_delete(HashMap *hm, const char *key, size_t key_len, void **out){
     if(_update_buffer_size(hm) != HM_OK){   
         return HM_ERR; 
     }
@@ -86,7 +92,7 @@ HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out){
     if(kv_p.len == key_len && memcmp(kv_p.data, key, kv_p.len) == 0){
         hm->buckets[idx] = prev->next;
         *out = prev->val; 
-        free_node(prev); 
+        free(prev); 
         hm->item_count--;
         return HM_OK;
     }
@@ -97,7 +103,7 @@ HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out){
         if(kv_c.len == key_len && memcmp(kv_c.data, key, kv_c.len) == 0){
             prev->next = current->next;
             *out = current->val; 
-            free_node(current);
+            free(current);
             hm->item_count--;
             return HM_OK;
         }

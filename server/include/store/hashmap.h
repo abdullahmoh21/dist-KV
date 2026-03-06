@@ -18,6 +18,11 @@
     #define FNV_PRIME 1099511628211ULL
 #endif
 
+typedef struct {
+    const char *data;
+    size_t len;
+} KeyView;
+
 typedef struct HashNode {
     void *val;
     struct HashNode *next;
@@ -30,11 +35,6 @@ typedef struct HashMap {
     const KeyView (*get_key)(void *val);
 } HashMap;
 
-typedef struct {
-    const char *data;
-    size_t len;
-} KeyView;
-
 typedef enum {
     HM_OK,
     HM_OOM,
@@ -46,7 +46,7 @@ typedef enum {
 
 HashMap* hm_create(const KeyView (*get_key_fn)(void *));
 HM_RESULT hm_insert(HashMap *hm, void *val);
-HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out);
-HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out);
+HM_RESULT hm_get(HashMap *hm, const char *key, size_t key_len, void **out);
+HM_RESULT hm_delete(HashMap *hm, const char *key, size_t key_len, void **out);
 HM_RESULT hm_free_shallow(HashMap *hm);
 #endif
