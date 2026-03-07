@@ -30,7 +30,7 @@ enum RS_RESULT create_store(RedisStore *store){
 enum RS_RESULT rs_get(RedisStore *store, BulkString *key_str, RedisObject **out){
     if(key_str == NULL || key_str->data == NULL ){ return RS_BAD_ARG; }
     RedisObject *res;
-    HM_RESULT search_status = hm_get(store->dict, key_str->data, key_str->len, &res);
+    HM_RESULT search_status = hm_get(store->dict, key_str->data, key_str->len, (void*) &res);
     if (search_status == HM_NOT_FOUND){ return RS_NOT_FOUND; }
     else if(search_status != HM_OK) {return RS_ERR; }
     
@@ -51,7 +51,7 @@ enum RS_RESULT rs_set(RedisStore *store, BulkString *key_str, BulkString *data_s
 
     
     RedisObject *existing;
-    HM_RESULT search_status = hm_get(store->dict, key_str->data, key_str->len, &existing);
+    HM_RESULT search_status = hm_get(store->dict, key_str->data, key_str->len, (void*) &existing);
 
     if(search_status == HM_OK && existing->type != T_KV){ return RS_WRONG_TYPE; }
 
@@ -99,7 +99,7 @@ enum RS_RESULT rs_delete(RedisStore *store, BulkString *key_str){
     if(key_str == NULL || key_str->data == NULL  ){ return RS_BAD_ARG; }
 
     RedisObject *obj = NULL;
-    HM_RESULT del_status = hm_delete(store->dict, key_str->data, key_str->len, &obj);
+    HM_RESULT del_status = hm_delete(store->dict, key_str->data, key_str->len, (void*) &obj);
     
     if(del_status == HM_NOT_FOUND){ return RS_NOT_FOUND; }
     else if(del_status != HM_OK){ return RS_ERR; }
@@ -110,7 +110,7 @@ enum RS_RESULT rs_delete(RedisStore *store, BulkString *key_str){
 
 enum RS_RESULT rs_zadd(RedisStore *store, BulkString *zkey_str, BulkString *member, double score){
     RedisObject *zset_obj = NULL;
-    HM_RESULT zset_search = hm_get(store->dict, zkey_str->data, zkey_str->len, &zset_obj);
+    HM_RESULT zset_search = hm_get(store->dict, zkey_str->data, zkey_str->len, (void*) &zset_obj);
 
     if(zset_search == HM_OK && zset_obj->type != T_ZSET){ return RS_WRONG_TYPE; }
     else if(zset_search == HM_ERR){ return RS_ERR; } 
@@ -131,9 +131,9 @@ enum RS_RESULT rs_zadd(RedisStore *store, BulkString *zkey_str, BulkString *memb
     return added;
 }
 
-enum RS_RESULT rs_zget(RedisStore *store, BulkString *key_str, BulkString *member_str, double *out){
+enum RS_RESULT rs_zscore(RedisStore *store, BulkString *key_str, BulkString *member_str, double *out){
     RedisObject *zset_obj;
-    HM_RESULT zset_search = hm_get(store->dict, key_str->data, key_str->len, &zset_obj);
+    HM_RESULT zset_search = hm_get(store->dict, key_str->data, key_str->len, (void*) &zset_obj);
     if(zset_search == HM_NOT_FOUND){ return RS_NOT_FOUND; }
     else if(zset_search != HM_OK){ return RS_ERR; }
     
@@ -142,7 +142,7 @@ enum RS_RESULT rs_zget(RedisStore *store, BulkString *key_str, BulkString *membe
     Zset *zset = (Zset*) zset_obj->data;
 
     ZSetMember *member;
-    HM_RESULT member_search = hm_get(zset->hm, member_str->data, member_str->len, &member);
+    HM_RESULT member_search = hm_get(zset->hm, member_str->data, member_str->len, (void*) &member);
     if(member_search == HM_NOT_FOUND){ return RS_NOT_FOUND; }
     *out = member->score;
     return RS_OK;
@@ -150,7 +150,7 @@ enum RS_RESULT rs_zget(RedisStore *store, BulkString *key_str, BulkString *membe
 
 enum RS_RESULT rs_get_zset(RedisStore *store, BulkString *key_str, Zset **out){
     RedisObject *zset_obj = NULL;
-    HM_RESULT zset_search = hm_get(store->dict, key_str->data, key_str->len, &zset_obj);
+    HM_RESULT zset_search = hm_get(store->dict, key_str->data, key_str->len, (void*) &zset_obj);
 
     if(zset_search == HM_NOT_FOUND || zset_obj == NULL){ return RS_NOT_FOUND; }
     else if(zset_search != HM_OK){ return RS_ERR; }
@@ -161,7 +161,7 @@ enum RS_RESULT rs_get_zset(RedisStore *store, BulkString *key_str, Zset **out){
 
 enum RS_RESULT rs_zset_remove_member(Zset *zset, BulkString *member_str){
     ZSetMember *member;
-    HM_RESULT h_member_del = hm_delete(zset->hm, member_str->data, member_str->len, &member);
+    HM_RESULT h_member_del = hm_delete(zset->hm, member_str->data, member_str->len, (void*) &member);
 
     if(h_member_del == HM_NOT_FOUND){ return RS_NOT_FOUND; }
     else if(h_member_del != HM_OK){ return RS_ERR; }
@@ -179,7 +179,7 @@ enum RS_RESULT rs_zrange_score_init(RedisStore *store, BulkString *key, double m
     if(store == NULL || key == NULL ) return RS_ERR;
 
     RedisObject *obj = NULL;
-    HM_RESULT search = hm_get(store->dict, key->data, key->len, &obj);
+    HM_RESULT search = hm_get(store->dict, key->data, key->len, (void*) &obj);
 
     if(search == HM_NOT_FOUND) return RS_NOT_FOUND;
     if(search != HM_OK) return RS_ERR;
@@ -201,7 +201,7 @@ ZSetMember* rs_ziterator_next(RS_ZIterator *it){
 // HELPERS
 static enum RS_RESULT _add_member(Zset *zset, BulkString *member_str, double score){
     ZSetMember *existing = NULL;
-    HM_RESULT search = hm_get(zset->hm, member_str->data, member_str->len, &existing);
+    HM_RESULT search = hm_get(zset->hm, member_str->data, member_str->len, (void*) &existing);
     if(search == HM_OK){    // existing member
         SL_RESULT updated = sl_update(zset->sl, member_str->data, member_str->len, existing->score, score);
         if(updated != SL_OK){
@@ -237,7 +237,7 @@ static enum RS_RESULT _add_member(Zset *zset, BulkString *member_str, double sco
         SL_RESULT added_to_sl = sl_insert(zset->sl, member_to_add);
         if(added_to_sl != SL_OK){
             ZSetMember *out = NULL; 
-            hm_delete(zset->hm, member_to_add->key, member_to_add->key_len, &out);
+            hm_delete(zset->hm, member_to_add->key, member_to_add->key_len, (void*) &out);
             free(member_to_add->key);
             free(member_to_add);
             return added_to_sl == SL_OOM ? RS_OOM : RS_ERR;

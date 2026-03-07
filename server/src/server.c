@@ -129,7 +129,7 @@ void handle_client(int clientfd, struct Buffer *ib, RedisStore *store) {
             // still need more -> expand buffer
             if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
                 if(!expand_buffer(ib)){
-                    printf("Error expanding buffer");
+                    fprintf(stderr, "[ERROR] Failed to expand buffer\n");
                     exit(1);
                 }
             }
@@ -147,30 +147,34 @@ void handle_client(int clientfd, struct Buffer *ib, RedisStore *store) {
         ib->used += n;
       
         while(ib->read_idx < ib->used){     // parsing loop
-            if(ib->data[ib->read_idx] == '*'){   
-                struct RedisCommand command;
-                char *start_buff = ib->data + ib->read_idx;
-                size_t buff_len = ib->used - ib->read_idx;
-                int consumed = parse_array_command(start_buff, buff_len, &command);
-                if(consumed == 0){
-                    break;
-                } else if(consumed < 0){
-                    printf("Parsing error. ");
-                    //send error back
-                    return;
+
+            struct RedisCommand command;
+            char *start_buff = ib->data + ib->read_idx;
+            size_t buff_len = ib->used - ib->read_idx;
+            ssize_t consumed = parse_array_command(start_buff, buff_len, &command);
+
+            if(consumed == 0){
+                break;
+            } else if(consumed < 0){
+                fprintf(stderr, "[ERROR] Parse error: %zd\n", consumed);
+                char *msg;
+                switch (consumed) {
+                    case ERR_INVALID_TYPE:    msg = "Protocol error: expected '*', got other"; break;
+                    case ERR_INVALID_ARRAY_L: msg = "Protocol error: invalid multibulk length"; break;
+                    case ERR_ARRAY_TOO_BIG:   msg = "Protocol error: too many arguments"; break;
+                    case ERR_INVALID_BULK_P:  msg = "Protocol error: expected '$', got other"; break;
+                    case ERR_BULK_TOO_BIG:    msg = "Protocol error: bulk string too long"; break;
+                    case ERR_MEM_ALLOC:       msg = "Server error: out of memory"; break;
+                    default:                  msg = "Protocol error: unknown error"; break;
                 }
-                
-                ExecuteResult res = execute_command(clientfd, &command, store);
-                if(res == EE_ERR){
-                    printf("Parsing error. server shutting down.");
-                    exit(1);
-                }
-                ib->read_idx += consumed;
-                free_command(&command);
-            } else {
-                // send error
-                return;
+                sendError(clientfd, msg);
+                close(clientfd);
+                break;
             }
+            
+            ExecuteResult res = dispatch_command(clientfd, &command, store);   
+            ib->read_idx += (size_t) consumed;
+            free_command(&command);
         }
     }
 }

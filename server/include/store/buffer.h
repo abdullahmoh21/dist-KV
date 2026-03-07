@@ -4,7 +4,7 @@
 #include <stddef.h>
 #define MAX_EXCEEDED (16 * 1024 * 1024)
 
-enum ExpansionStatus {
+enum ExpansionResult {
     EXPANSION_OK,
     EXPANSION_OOM,
     EXPANSION_MAX_EXCEEDED,
@@ -17,6 +17,6 @@ struct Buffer {
     size_t read_idx;    // start of data. where parser starts
 };
 
-enum ExpansionStatus expand_buffer(struct Buffer *ib);
+int expand_buffer(struct Buffer *buff);
 
 #endif

@@ -32,7 +32,7 @@ enum RS_RESULT rs_get(RedisStore *store, BulkString *key_str, RedisObject **out)
 enum RS_RESULT rs_set(RedisStore *store, BulkString *key_str, BulkString *data_str);
 enum RS_RESULT rs_delete(RedisStore *store, BulkString *key_str);
 enum RS_RESULT rs_zadd(RedisStore *store, BulkString *zkey_str, BulkString *member, double score);
-enum RS_RESULT rs_zget(RedisStore *store, BulkString *key_str, BulkString *member_str, double *out);
+enum RS_RESULT rs_zscore(RedisStore *store, BulkString *key_str, BulkString *member_str, double *out);
 enum RS_RESULT rs_get_zset(RedisStore *store, BulkString *key_str, Zset **out);
 enum RS_RESULT rs_zset_remove_member(Zset *zset, BulkString *member_str);
 enum RS_RESULT rs_zrange_score_init(RedisStore *store, BulkString *key, double min, double max, RS_ZIterator *out_it);

@@ -28,7 +28,7 @@ HashMap* hm_create(const KeyView (*get_key_fn)(void *)){
 
 HM_RESULT hm_insert(HashMap *hm, void *val) {    
     KeyView key_to_add = hm->get_key(val);
-    char *key = key_to_add.data;
+    const char *key = key_to_add.data;
     size_t key_len = key_to_add.len;
     size_t idx = _hash_key(key, key_len, hm->size);
 
