@@ -2,6 +2,7 @@
 #define BUFFER_H
 
 #include <stddef.h>
+#define INITIAL_BUFF_CAPACITY 4096
 #define MAX_EXCEEDED (16 * 1024 * 1024)
 
 enum ExpansionResult {

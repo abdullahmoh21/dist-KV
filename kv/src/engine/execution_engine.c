@@ -304,6 +304,7 @@ static ExecuteResult exec_command(int clientfd, RedisCommand *command, RedisStor
 }
 
 static ExecuteResult exec_flush(int clientfd, RedisCommand *command, RedisStore *store){return 0;}
+
 static ExecuteResult exec_wait(int clientfd, RedisCommand *command, RedisStore *store){return 0;}
 
 
