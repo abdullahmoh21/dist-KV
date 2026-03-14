@@ -6,12 +6,12 @@
 #include <time.h>
 
 // Helper prototypes
-static size_t _hash_key(const char *key, size_t key_len, size_t idx_space_len);
+static size_t _hash_key(char *key, size_t key_len, size_t idx_space_len);
 static HM_RESULT _update_buffer_size(HashMap *hm);
 static HM_RESULT _rehash(HashMap *hm, size_t new_size);
 
 
-HashMap* hm_create(const KeyView (*get_key_fn)(void *)){
+HashMap* hm_create(KeyView (*get_key_fn)(void *)){
     HashMap *hm = malloc(sizeof(HashMap));
     if(hm == NULL) {return NULL;}
     HashNode **buckets = calloc(DEFAULT_SIZE, sizeof(HashNode*));
@@ -28,7 +28,7 @@ HashMap* hm_create(const KeyView (*get_key_fn)(void *)){
 
 HM_RESULT hm_insert(HashMap *hm, void *val) {    
     KeyView key_to_add = hm->get_key(val);
-    const char *key = key_to_add.data;
+    char *key = key_to_add.data;
     size_t key_len = key_to_add.len;
     size_t idx = _hash_key(key, key_len, hm->size);
 
@@ -60,7 +60,7 @@ HM_RESULT hm_insert(HashMap *hm, void *val) {
     return HM_OK;
 }
 
-HM_RESULT hm_get(HashMap *hm, const char *key, size_t key_len, void **out){
+HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out){
     size_t idx = _hash_key(key, key_len, hm->size);
     if(hm->buckets[idx] == NULL){
         return HM_NOT_FOUND;
@@ -78,7 +78,7 @@ HM_RESULT hm_get(HashMap *hm, const char *key, size_t key_len, void **out){
     }
 }
 
-HM_RESULT hm_delete(HashMap *hm, const char *key, size_t key_len, void **out){
+HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out){
     if(_update_buffer_size(hm) != HM_OK){   
         return HM_ERR; 
     }
@@ -114,7 +114,7 @@ HM_RESULT hm_delete(HashMap *hm, const char *key, size_t key_len, void **out){
 }
 
 HM_RESULT hm_free_shallow(HashMap *hm){
-    for(int i = 0; i<hm->size; i++){
+    for(size_t i = 0; i<hm->size; i++){
         HashNode *current = hm->buckets[i];
         HashNode *next = NULL;
         while(current != NULL){
@@ -129,7 +129,7 @@ HM_RESULT hm_free_shallow(HashMap *hm){
     return HM_OK;
 }
 
-size_t _hash_key(const char *key, size_t key_len, size_t idx_space_len) {
+size_t _hash_key(char *key, size_t key_len, size_t idx_space_len) {
     size_t hash = FNV_OFFSET; 
     for(size_t i = 0; i<key_len; i++) {
         hash ^= (unsigned char)(*key++);

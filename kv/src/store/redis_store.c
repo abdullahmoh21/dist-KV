@@ -8,12 +8,12 @@ static RedisObject*  _create_zset(BulkString *key_str);
 static void _free_redis_object(RedisObject *obj);
 static void _free_zset(Zset *zset);
 
-const KeyView get_redis_object_key(void *obj){
+KeyView get_redis_object_key(void *obj){
     RedisObject *ro = (RedisObject *) obj;
     return (KeyView){ .data = ro->key, .len = ro->key_len };
 }
 
-const KeyView get_zset_member(void *obj){
+KeyView get_zset_member(void *obj){
     ZSetMember *zmo = (ZSetMember *) obj;
     return (KeyView){.data = zmo->key, .len = zmo->key_len};
 }
@@ -191,7 +191,7 @@ enum RS_RESULT rs_zrange_score_init(RedisStore *store, BulkString *key, double m
     return RS_OK;
 }
 
-ZSetMember* rs_ziterator_next(RS_ZIterator *it){
+struct ZSetMember* rs_ziterator_next(RS_ZIterator *it){
     if (sl_next(&it->internal_it)) {
         return it->internal_it.current->obj;
     }

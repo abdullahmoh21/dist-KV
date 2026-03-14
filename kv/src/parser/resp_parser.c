@@ -35,8 +35,12 @@ ssize_t parse_array_command(char *buff, size_t buff_len, struct RedisCommand *ou
     if (array_len < 0) return ERR_INVALID_ARRAY_L;
     if (array_len > MAX_ARGS) return ERR_ARRAY_TOO_BIG;
 
-    if (!consume_delimiter(buff, &tmp_cursor, buff_len)) {
+    int delim_rc = consume_delimiter(buff, &tmp_cursor, buff_len);
+    if (delim_rc == 0) {
         return PARSE_INCOMPLETE;
+    }
+    if (delim_rc < 0) {
+        return ERR_INVALID_DELIM;
     }
 
     // Allocate into a local pointer first
@@ -67,9 +71,14 @@ ssize_t parse_array_command(char *buff, size_t buff_len, struct RedisCommand *ou
         }
 
         // Handle the \r\n after the length ($5\r\n...)
-        if (!consume_delimiter(buff, &tmp_cursor, buff_len)) {
+        delim_rc = consume_delimiter(buff, &tmp_cursor, buff_len);
+        if (delim_rc == 0) {
             free(strings);
             return PARSE_INCOMPLETE;
+        }
+        if (delim_rc < 0) {
+            free(strings);
+            return ERR_INVALID_DELIM;
         }
 
         if (bytes_to_read == -1) { 
@@ -88,14 +97,21 @@ ssize_t parse_array_command(char *buff, size_t buff_len, struct RedisCommand *ou
         parse_bulk_string(buff, &tmp_cursor, bytes_to_read, &strings[i]);
 
         // Consume the final \r\n after the bulk data
-        if (!consume_delimiter(buff, &tmp_cursor, buff_len)) {
+        delim_rc = consume_delimiter(buff, &tmp_cursor, buff_len);
+        if (delim_rc == 0) {
             free(strings);
             return PARSE_INCOMPLETE;
+        }
+        if (delim_rc < 0) {
+            free(strings);
+            return ERR_INVALID_DELIM;
         }
     }
     
     out->args = strings;
     out->arg_count = array_len;
+    out->raw_start = buff;
+    out->raw_len = (ssize_t)tmp_cursor;
     return (ssize_t)tmp_cursor; 
 }
 
@@ -123,7 +139,7 @@ static int advance_till_delimeter(char *buff, size_t buff_len, size_t *cursor){
 static int parse_int(char *buff, size_t start, size_t len, ssize_t *out){
     ssize_t result = 0;
     int neg = 0;
-    int i = 0;
+    size_t i = 0;
     if(buff[start] == '-'){
         neg = 1;
         i = 1;
@@ -146,7 +162,10 @@ static int consume_delimiter(char *buff, size_t *cursor, size_t buff_len){
         *cursor += 2;   // Move past BOTH \r and \n
         return 1;
     }
-    return 0;
+    if (*cursor + 1 >= buff_len) {
+        return 0;
+    }
+    return -1;
 }
 
 static void parse_bulk_string(char *buff, size_t *cursor, size_t bytes_to_read, struct BulkString *out){

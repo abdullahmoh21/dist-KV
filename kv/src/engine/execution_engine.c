@@ -17,6 +17,7 @@ ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len);
 ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count);
 static ExecuteResult _sendRaw(int clientfd, const char *buff, size_t len);
 static ExecuteResult _parseDouble(BulkString *str, double *out);
+static ExecuteResult _validate_key_sizes(int clientfd, RedisCommand *command, const struct CommandEntry *entry);
 
 // Command handler prototypes
 static ExecuteResult exec_get(int clientfd, RedisCommand *command, RedisStore *store);
@@ -66,7 +67,7 @@ ExecuteResult dispatch_command(int clientfd, RedisCommand *command, RedisStore *
     BulkString *cmd_str = &command->args[0];
     
     size_t num_commands = sizeof(commandTable) / sizeof(commandTable[0]);
-    for(int i=0; i < num_commands; i++){
+    for(size_t i=0; i < num_commands; i++){
         struct CommandEntry *entry = &commandTable[i];
 
         if(entry->name_len == cmd_str->len && strncasecmp(cmd_str->data, entry->name, entry->name_len) == 0) {
@@ -78,7 +79,17 @@ ExecuteResult dispatch_command(int clientfd, RedisCommand *command, RedisStore *
                 return EE_ERR_ARITY;
             }
 
-            return entry->handler(clientfd, command, store);    
+            ExecuteResult key_res = _validate_key_sizes(clientfd, command, entry);
+            if (key_res != EE_OK) {
+                return key_res;
+            }
+
+            ExecuteResult res = entry->handler(clientfd, command, store);    
+
+            if (res != EE_OK) {
+                return res;
+            }
+            return (entry->flags & CMD_FLAG_WRITE) ? EE_WRITE_OK : EE_OK;
         }
     }
     char msg[256]; 
@@ -90,11 +101,6 @@ ExecuteResult dispatch_command(int clientfd, RedisCommand *command, RedisStore *
 static ExecuteResult exec_set(int clientfd, RedisCommand *command, RedisStore *store){
     BulkString *key = &command->args[1];
     BulkString *value = &command->args[2];
-    
-    if(key->len > MAX_KEY_SIZE){
-        sendError(clientfd, "Key size too big");
-        return EE_OK;
-    }
 
     enum RS_RESULT set_status = rs_set(store, key, value);
 
@@ -113,10 +119,6 @@ static ExecuteResult exec_set(int clientfd, RedisCommand *command, RedisStore *s
 
 static ExecuteResult exec_get(int clientfd, RedisCommand *command, RedisStore *store){
     BulkString *key = &command->args[1];
-    if((int) key->len > MAX_KEY_SIZE){
-        sendError(clientfd, "Key size too big");
-        return EE_OK;
-    }
 
     RedisObject *obj;
     enum RS_RESULT res = rs_get(store, key, &obj);
@@ -228,9 +230,15 @@ static ExecuteResult exec_zrem(int clientfd, RedisCommand *command, RedisStore *
     return EE_OK;
 }
 
-static ExecuteResult exec_zrange(int clientfd, RedisCommand *command, RedisStore *store){return 0;};
+static ExecuteResult exec_zrange(int clientfd, RedisCommand *command, RedisStore *store){
+    (void) clientfd;
+    (void) command;
+    (void) store;
+    return 0;
+};
 
 static ExecuteResult exec_ping(int clientfd, RedisCommand *command, RedisStore *store){
+    (void)store;
     if(command->arg_count > 1){
         BulkString *data_str = &command->args[1];
         return sendBulkString(clientfd, data_str->data, data_str->len);
@@ -240,6 +248,7 @@ static ExecuteResult exec_ping(int clientfd, RedisCommand *command, RedisStore *
 }
 
 static ExecuteResult exec_command(int clientfd, RedisCommand *command, RedisStore *store){
+    (void)store;
     if (command->arg_count > 1) {   // tmp stub to keep cli happy
         BulkString *subcommand = &command->args[1];
         if (strncasecmp(subcommand->data, "docs", subcommand->len) == 0) {
@@ -269,7 +278,7 @@ static ExecuteResult exec_command(int clientfd, RedisCommand *command, RedisStor
         int set_flags = __builtin_popcount(cmd->flags);
         res = sendArrayHeader(clientfd, set_flags);
         if(res != EE_OK) return res;
-        for(int j=0; j<FLAG_MAP_SIZE; j++){
+        for(u_long j=0; j<FLAG_MAP_SIZE; j++){
             if(cmd->flags & flagMap[j].mask){
                 res = sendBulkString(clientfd, flagMap[j].name, flagMap[j].len);
                 if(res != EE_OK) return res;
@@ -303,18 +312,34 @@ static ExecuteResult exec_command(int clientfd, RedisCommand *command, RedisStor
     return EE_OK;
 }
 
-static ExecuteResult exec_flush(int clientfd, RedisCommand *command, RedisStore *store){return 0;}
+static ExecuteResult exec_flush(int clientfd, RedisCommand *command, RedisStore *store){
+    (void) clientfd;
+    (void) command;
+    (void) store;
+    return 0;
+}
 
-static ExecuteResult exec_wait(int clientfd, RedisCommand *command, RedisStore *store){return 0;}
+static ExecuteResult exec_wait(int clientfd, RedisCommand *command, RedisStore *store){
+    (void) clientfd;
+    (void) command;
+    (void) store;
+    return 0;
+}
 
 
 // -------------- HELPERS -------------- //
 ExecuteResult sendOK(int clientfd){
+    if(clientfd == -1){ // dummy client for AOF replay
+        return EE_OK;
+    }
     char *buff = "+OK\r\n";
     return _sendRaw(clientfd, buff, 5);
 }
 
 ExecuteResult sendError(int clientfd, char *message){
+    if(clientfd == -1){ 
+        return EE_OK;
+    }
     char response[256];
     if(snprintf(response, sizeof(response), "-ERR %s\r\n", message) < 0){
         return EE_ERR; 
@@ -323,20 +348,29 @@ ExecuteResult sendError(int clientfd, char *message){
 }
 
 ExecuteResult sendNotFound(int clientfd){
+    if(clientfd == -1){ 
+        return EE_OK;
+    }
     char *buff = "$-1\r\n";
     return _sendRaw(clientfd, buff, 5);
 }
 
 ExecuteResult sendInt(int clientfd, int integerToSend){
+    if(clientfd == -1){ 
+        return EE_OK;
+    }
     char buf[23];
     int len = snprintf(buf, sizeof(buf), ":%d\r\n", integerToSend);
     return _sendRaw(clientfd, buf, len);
 }
 
 ExecuteResult sendArrayHeader(int clientfd, int count){
+    if(clientfd == -1){ 
+        return EE_OK;
+    }
     char h_buff[32];    
     int h_len = snprintf(h_buff, sizeof(h_buff),"*%d\r\n", count);
-    if (h_len < 0 || h_len >= sizeof(h_buff)) return EE_ERR;
+    if (h_len < 0 || (u_long) h_len >= sizeof(h_buff)) return EE_ERR;
 
     ExecuteResult res = _sendRaw(clientfd, h_buff, h_len);
     if(res != EE_OK) return res;    // propagate up
@@ -344,6 +378,9 @@ ExecuteResult sendArrayHeader(int clientfd, int count){
 }
 
 ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count){
+    if(clientfd == -1){ 
+        return EE_OK;
+    }
     ExecuteResult res = sendArrayHeader(clientfd, count);
     if(res != EE_OK) return res;    // propagate up
     for(int i = 0; i < count; i++){
@@ -354,10 +391,13 @@ ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count){
 }
 
 ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len){
+    if(clientfd == -1){ 
+        return EE_OK;
+    }
     char b_buff[32];
 
     int b_len = snprintf(b_buff, sizeof(b_buff), "$%zu\r\n", data_len);
-    if (b_len < 0 || b_len >= sizeof(b_buff)) return EE_ERR;
+    if (b_len < 0 || (u_long) b_len >= sizeof(b_buff)) return EE_ERR;
 
     ExecuteResult size_sent = _sendRaw(clientfd, b_buff, b_len);
     if(size_sent != EE_OK) return size_sent;   
@@ -372,6 +412,9 @@ ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len){
 }
 
 static ExecuteResult _sendRaw(int clientfd, const char *buff, size_t len){
+    if(clientfd == -1){ 
+        return EE_OK;
+    }
     size_t total_sent = 0;
     while(total_sent < len){
         ssize_t n = send(clientfd, buff + total_sent, len - total_sent, MSG_NOSIGNAL);
@@ -407,5 +450,37 @@ ExecuteResult _parseDouble(BulkString *str, double *out) {
         return EE_ERR;
     }
     
+    return EE_OK;
+}
+
+static ExecuteResult _validate_key_sizes(int clientfd, RedisCommand *command, const struct CommandEntry *entry) {
+    if (entry->first_key <= 0 || entry->step == 0) {
+        return EE_OK;
+    }
+
+    int first_key = entry->first_key;
+    int last_key = entry->last_key;
+    int step = (entry->step > 0) ? entry->step : 1;
+
+    if (last_key < 0) {
+        last_key = command->arg_count + last_key;
+    }
+
+    if (last_key >= command->arg_count) {
+        last_key = command->arg_count - 1;
+    }
+
+    if (first_key >= command->arg_count || last_key < first_key) {
+        return EE_OK;
+    }
+
+    for (int key_idx = first_key; key_idx <= last_key; key_idx += step) {
+        BulkString *key = &command->args[key_idx];
+        if (key->len > MAX_KEY_SIZE) {
+            sendError(clientfd, "Key size too big");
+            return EE_KEY_TOO_LONG;
+        }
+    }
+
     return EE_OK;
 }

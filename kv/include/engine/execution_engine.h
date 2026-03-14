@@ -2,6 +2,7 @@
 #define EXECUTE_ENGINE_H
 
 #include <stddef.h>    
+#include <store/object.h>
 #include <sys/types.h>  
 
 // Forward declarations
@@ -10,6 +11,7 @@ typedef struct RedisStore RedisStore;
 
 typedef enum { 
     EE_OK,
+    EE_WRITE_OK,
     EE_OOM,
     EE_COMMAND_NOT_FOUND,
     EE_ERR,

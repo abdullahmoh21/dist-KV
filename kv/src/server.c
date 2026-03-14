@@ -1,10 +1,12 @@
 #include "store/buffer.h"
+#include "aof/aof.h"
 #include "store/skip_list.h"
 #include "store/hashmap.h"
 #include "store/redis_store.h"
 #include "engine/execution_engine.h"
 #include "parser/resp_parser.h"
 #include "event_loop/event_loop.h"
+#include "utils/time.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -30,9 +32,9 @@ typedef struct {
 
 // Prototypes
 int set_nonblocking(int fd);
-const KeyView get_client_key(void *client_ptr);
+KeyView get_client_key(void *client_ptr);
 void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, RedisStore *store);
-void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, RedisStore *store);
+void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, RedisStore *store, AOFManager *aof);
 void close_client(int clientfd, event_loop_t *loop, HashMap *clients);
 void *get_in_addr(struct sockaddr *sa);
 
@@ -49,12 +51,26 @@ int main(void){
         return 1;
     }
 
-    // Initialize client registry using existing HashMap
+    printf("About to call aof_load\n");
+    enum AOF_RESULT res = aof_load(&store);
+    if(res != AOF_OK){
+        fprintf(stderr, "Failed to load AOF into memory\n");
+        return 1;
+    }
+    
+
     HashMap *clients = hm_create(get_client_key);
     if(!clients){
         fprintf(stderr, "Failed to create client registry\n");
         return 1;
     }
+
+    AOFManager *aof;
+    if(aof_create(&aof) != AOF_OK){
+        fprintf(stderr, "Failed to create AOF buffer\n");
+        return 1;
+    }
+
 
     // Setup address info
     memset(&hints, 0, sizeof hints);
@@ -128,8 +144,11 @@ int main(void){
 
     // Main event loop
     fired_event_t events[MAX_EVENTS];
+    uint64_t next_flush_ms = monotonic_ms() + 1000;
     while(1) {
-        int n = event_loop_wait(loop, -1, events, MAX_EVENTS);
+        uint64_t now_ms = monotonic_ms();
+        int timeout_ms = (next_flush_ms > now_ms) ? ((int) next_flush_ms - now_ms) : 0;
+        int n = event_loop_wait(loop, timeout_ms, events, MAX_EVENTS);
         
         if(n < 0){
             if(errno == EINTR) continue;
@@ -146,7 +165,14 @@ int main(void){
                 handle_new_connection(serverfd, loop, clients, &store);
             } else if(mask & EVENT_READABLE){
                 // Data available on client socket
-                handle_client_read(fd, loop, clients, &store);
+                handle_client_read(fd, loop, clients, &store, aof);
+            }
+        }
+
+        now_ms = monotonic_ms();
+        if(now_ms >= next_flush_ms){
+            if(aof_check_flush(aof) == AOF_OK){
+                next_flush_ms = now_ms + 1000;
             }
         }
     }
@@ -155,8 +181,7 @@ int main(void){
     event_loop_destroy(loop);
     close(serverfd);
     
-    // Note: In production, iterate through HashMap and free all ClientStates
-    // For now, we rely on process termination to clean up
+    // TODO: iterate through HashMap and free all ClientStates
     hm_free_shallow(clients);
 
     return 0;
@@ -171,10 +196,10 @@ int set_nonblocking(int fd) {
 }
 
 // Key extraction function for HashMap
-const KeyView get_client_key(void *client_ptr) {
+KeyView get_client_key(void *client_ptr) {
     ClientState *client = (ClientState *)client_ptr;
     KeyView kv;
-    kv.data = (const char *)&client->fd;
+    kv.data = (char *)&client->fd;
     kv.len = sizeof(int);
     return kv;
 }
@@ -228,6 +253,7 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
         return;
     }
     buffer->capacity = INITIAL_BUFF_CAPACITY;
+    buffer->max_capacity = MAX_CLIENT_INPUT_BUFF_LEN;
     buffer->used = 0;
     buffer->read_idx = 0;
     client->buffer = buffer;
@@ -257,10 +283,9 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     printf("server: got connection from %s (fd=%d, total clients=%zu)\n", s, clientfd, clients->item_count);
 }
 
-void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, RedisStore *store) {
-    // Find client state using HashMap
+void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, RedisStore *store, AOFManager *aof) {
     ClientState *client = NULL;
-    if(hm_get(clients, (const char *)&clientfd, sizeof(int), (void **)&client) != HM_OK || !client){
+    if(hm_get(clients, (char *)&clientfd, sizeof(int), (void **)&client) != HM_OK || !client){
         fprintf(stderr, "Client not found for fd %d\n", clientfd);
         close_client(clientfd, loop, clients);
         return;
@@ -268,7 +293,6 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
 
     struct Buffer *ib = client->buffer;
 
-    // Ensure buffer has space
     if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
         // Try removing used data
         size_t remaining = ib->used - ib->read_idx;
@@ -279,14 +303,13 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
         // Still need more -> expand buffer
         if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
             if(!expand_buffer(ib)){
-                fprintf(stderr, "[ERROR] Failed to expand buffer\n");
+                sendError(clientfd, "Server error: failed to expand input buffer");
                 close_client(clientfd, loop, clients);
                 return;
             }
         }
     }
 
-    // Read data from socket
     ssize_t n = recv(clientfd, ib->data + ib->used, ib->capacity - ib->used, 0);
     
     if(n == 0) {
@@ -296,7 +319,6 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
         return;
     } else if (n < 0) {
         if(errno == EAGAIN || errno == EWOULDBLOCK){
-            // No more data available right now
             return;
         }
         if(errno == EINTR){
@@ -317,6 +339,11 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
         ssize_t consumed = parse_array_command(start_buff, buff_len, &command);
 
         if(consumed == 0){
+            if (ib->read_idx == 0 && ib->used == ib->capacity && ib->capacity >= ib->max_capacity) {
+                sendError(clientfd, "Protocol error: max input buffer length exceeded");
+                close_client(clientfd, loop, clients);
+                return;
+            }
             // Need more data
             break;
         } else if(consumed < 0){
@@ -327,6 +354,7 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
                 case ERR_INVALID_ARRAY_L: msg = "Protocol error: invalid multibulk length"; break;
                 case ERR_ARRAY_TOO_BIG:   msg = "Protocol error: too many arguments"; break;
                 case ERR_INVALID_BULK_P:  msg = "Protocol error: expected '$', got other"; break;
+                case ERR_INVALID_DELIM:   msg = "Protocol error: expected CRLF delimiter"; break;
                 case ERR_BULK_TOO_BIG:    msg = "Protocol error: bulk string too long"; break;
                 case ERR_MEM_ALLOC:       msg = "Server error: out of memory"; break;
                 default:                  msg = "Protocol error: unknown error"; break;
@@ -337,7 +365,11 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
         }
         
         ExecuteResult res = dispatch_command(clientfd, &command, store);
-        (void)res; // Unused for now
+
+        if(res == EE_WRITE_OK){
+            aof_add(aof, &command);
+        }
+
         ib->read_idx += (size_t) consumed;
         free_command(&command);
     }
@@ -349,7 +381,7 @@ void close_client(int clientfd, event_loop_t *loop, HashMap *clients) {
     
     // Remove from HashMap and cleanup
     ClientState *client = NULL;
-    if(hm_delete(clients, (const char *)&clientfd, sizeof(int), (void **)&client) == HM_OK && client){
+    if(hm_delete(clients, (char *)&clientfd, sizeof(int), (void **)&client) == HM_OK && client){
         if(client->buffer){
             free(client->buffer->data);
             free(client->buffer);
@@ -367,3 +399,4 @@ void *get_in_addr(struct sockaddr *sa){
 
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
+

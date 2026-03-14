@@ -40,6 +40,8 @@ SERVER_SRCS = $(SERVER_SRC_DIR)/server.c \
               $(SERVER_SRC_DIR)/store/hashmap.c \
               $(SERVER_SRC_DIR)/store/redis_store.c \
               $(SERVER_SRC_DIR)/store/skip_list.c \
+			  $(SERVER_SRC_DIR)/utils/time.c \
+			  $(SERVER_SRC_DIR)/aof/aof.c \
               $(EVENT_LOOP_SRC)
 
 # Client source files
