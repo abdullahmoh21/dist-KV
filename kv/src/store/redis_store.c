@@ -1,4 +1,6 @@
 #include <store/redis_store.h>
+#include <store/hashmap.h>
+#include <store/skip_list.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -175,29 +177,6 @@ enum RS_RESULT rs_zset_remove_member(Zset *zset, BulkString *member_str){
     return RS_OK;
 }
 
-enum RS_RESULT rs_zrange_score_init(RedisStore *store, BulkString *key, double min, double max, RS_ZIterator *out_it) {
-    if(store == NULL || key == NULL ) return RS_ERR;
-
-    RedisObject *obj = NULL;
-    HM_RESULT search = hm_get(store->dict, key->data, key->len, (void*) &obj);
-
-    if(search == HM_NOT_FOUND) return RS_NOT_FOUND;
-    if(search != HM_OK) return RS_ERR;
-
-    if(obj->type != T_ZSET) return RS_WRONG_TYPE;
-
-    Zset *zs = (Zset*) obj->data;
-    out_it->internal_it = sl_iterator_score(zs->sl, min, max);
-    return RS_OK;
-}
-
-struct ZSetMember* rs_ziterator_next(RS_ZIterator *it){
-    if (sl_next(&it->internal_it)) {
-        return it->internal_it.current->obj;
-    }
-    return NULL;
-}
-
 // HELPERS
 static enum RS_RESULT _add_member(Zset *zset, BulkString *member_str, double score){
     ZSetMember *existing = NULL;
@@ -312,11 +291,13 @@ static void _free_zset(Zset *zset){
     if(zset == NULL){ return; } 
 
     if(zset->sl != NULL){
-        SkipListIterator it = sl_iterator_rank(zset->sl, 0, -1);
-        while(sl_next(&it)){
-            if(it.current != NULL){
-                free(it.current->obj);
+        SkipListNode *current = zset->sl->head != NULL ? zset->sl->head->forward[0] : NULL;
+        while(current != NULL){
+            if(current->obj != NULL){
+                free(current->obj->key);
+                free(current->obj);
             }
+            current = current->forward[0];
         }
         sl_free_shallow(zset->sl);  
     }

@@ -1,7 +1,7 @@
 #ifndef HASHMAP_H
 #define HASHMAP_H
 
-#include "object.h" 
+#include <stddef.h>
 #include <stdint.h>
 
 #define DEFAULT_SIZE 100
@@ -43,10 +43,18 @@ typedef enum {
     HM_ERR
 } HM_RESULT;
 
+typedef struct {
+    HashMap *map;
+    size_t bucket_idx;
+    HashNode *current_node;
+} HMIterator;
+
 
 HashMap* hm_create(KeyView (*get_key_fn)(void *));
 HM_RESULT hm_insert(HashMap *hm, void *val);
 HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out);
 HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out);
+HM_RESULT hm_it_init(HashMap *hm, HMIterator *out_it);
+HM_RESULT hm_it_next(HMIterator *it, void **out);
 HM_RESULT hm_free_shallow(HashMap *hm);
 #endif

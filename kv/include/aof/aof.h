@@ -8,12 +8,18 @@
 
 typedef struct RedisStore RedisStore;
 
-#define AOF_READ_BUFF_LEN 4096
-#define AOF_READ_BUFF_LEN_MAX (256 * 1024 * 1024)
+#define AOF_READ_BUFF_LEN (64 << 10)
+#define AOF_READ_BUFF_LEN_MAX (256ULL << 20)
 #define MAX_AOF_BUF_LIMIT AOF_READ_BUFF_LEN_MAX
+
+#define SET_HEADER "*3\r\n$3\r\nSET\r\n"
+#define SET_HEADER_LEN (sizeof(SET_HEADER) - 1)
+
+#define ZSET_BATCH_SIZE 1000
 
 enum AOF_RESULT {
     AOF_OK,
+    AOF_BUF_FULL,
     AOF_ERR,
     AOF_IO_ERR,
     AOF_EXEC_ERR,
@@ -38,7 +44,7 @@ typedef struct {
 enum AOF_RESULT aof_load(RedisStore *store);
 enum AOF_RESULT aof_create(AOFManager **out);
 enum AOF_RESULT aof_add(AOFManager *aof, RedisCommand *command);
-enum AOF_RESULT aof_compact(AOFManager *aof);
+void aof_compact(RedisStore *store);
 enum AOF_RESULT aof_check_flush(AOFManager *aof);
 void aof_destroy(AOFManager *aof);
 #endif

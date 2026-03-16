@@ -42,6 +42,10 @@ SERVER_SRCS = $(SERVER_SRC_DIR)/server.c \
               $(SERVER_SRC_DIR)/store/skip_list.c \
 			  $(SERVER_SRC_DIR)/utils/time.c \
 			  $(SERVER_SRC_DIR)/aof/aof.c \
+			  $(SERVER_SRC_DIR)/aof/aof_manager.c \
+			  $(SERVER_SRC_DIR)/aof/aof_load.c \
+			  $(SERVER_SRC_DIR)/aof/aof_compact.c \
+			  $(SERVER_SRC_DIR)/aof/aof_resp_encode.c \
               $(EVENT_LOOP_SRC)
 
 # Client source files

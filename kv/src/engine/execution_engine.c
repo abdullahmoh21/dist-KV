@@ -73,8 +73,8 @@ ExecuteResult dispatch_command(int clientfd, RedisCommand *command, RedisStore *
         if(entry->name_len == cmd_str->len && strncasecmp(cmd_str->data, entry->name, entry->name_len) == 0) {
             if ((entry->arity > 0 && command->arg_count != entry->arity) ||
                 (entry->arity < 0 && command->arg_count < (-entry->arity))) {
-                fprintf(stderr, "[ERROR] %s: wrong number of arguments (expected %d, got %d)\n", 
-                        entry->name, entry->arity, command->arg_count);
+                // fprintf(stderr, "[ERROR] %s: wrong number of arguments (expected %d, got %d)\n",
+                //         entry->name, entry->arity, command->arg_count);
                 sendError(clientfd, "Wrong number of arguments");
                 return EE_ERR_ARITY;
             }
@@ -148,7 +148,8 @@ static ExecuteResult exec_del(int clientfd, RedisCommand *command, RedisStore *s
 }
 
 static ExecuteResult exec_zadd(int clientfd, RedisCommand *command, RedisStore *store){
-     // arity > 4 guaranteed by dispatcher
+    // arity > 4 guaranteed by dispatcher
+    // should prolly add max arity check
     if(command->arg_count % 2 != 0){   
         sendError(clientfd, "Error: Odd arity for ZADD");
         return EE_OK;
@@ -421,7 +422,7 @@ static ExecuteResult _sendRaw(int clientfd, const char *buff, size_t len){
         if (n == -1) {
             if (errno == EINTR) continue; 
             if (errno == EAGAIN) break;
-            fprintf(stderr, "[ERROR] send() failed: %s (errno=%d)\n", strerror(errno), errno);
+            // fprintf(stderr, "[ERROR] send() failed: %s (errno=%d)\n", strerror(errno), errno);
             return EE_ERR;
         } else if(n == 0){
             return EE_SOCK_CLOSED;

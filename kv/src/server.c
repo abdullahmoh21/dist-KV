@@ -51,7 +51,6 @@ int main(void){
         return 1;
     }
 
-    printf("About to call aof_load\n");
     enum AOF_RESULT res = aof_load(&store);
     if(res != AOF_OK){
         fprintf(stderr, "Failed to load AOF into memory\n");
@@ -87,19 +86,19 @@ int main(void){
     for(p = servinfo; p != NULL; p = p->ai_next){
         serverfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if(serverfd == -1){
-            perror("server: socket");
+            // perror("server: socket");
             continue;
         }
 
         if (setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &yes,
             sizeof(int)) == -1) {
-            perror("setsockopt");
+            // perror("setsockopt");
             exit(1);
         }
 
         if(bind(serverfd, p->ai_addr, p->ai_addrlen) == -1){
             close(serverfd);
-            perror("server: bind");
+            // perror("server: bind");
             continue;
         }
         break;
@@ -113,7 +112,7 @@ int main(void){
     }
 
     if(listen(serverfd, BACKLOG) == -1){
-        perror("listen");
+        // perror("listen");
         exit(1);
     }
 
@@ -152,7 +151,7 @@ int main(void){
         
         if(n < 0){
             if(errno == EINTR) continue;
-            perror("event_loop_wait");
+            // perror("event_loop_wait");
             break;
         }
 
@@ -214,14 +213,14 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     int clientfd = accept(serverfd, (struct sockaddr*)&client_addr, &sin_size);
     if(clientfd == -1){
         if(errno != EAGAIN && errno != EWOULDBLOCK){
-            perror("accept");
+            // perror("accept");
         }
         return;
     }
 
     // Set client socket to non-blocking
     if(set_nonblocking(clientfd) == -1){
-        perror("set_nonblocking");
+        // perror("set_nonblocking");
         close(clientfd);
         return;
     }
@@ -229,7 +228,7 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     // Allocate client state
     ClientState *client = malloc(sizeof(ClientState));
     if(!client){
-        perror("malloc client");
+        // perror("malloc client");
         close(clientfd);
         return;
     }
@@ -239,14 +238,14 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     // Initialize buffer for this client
     struct Buffer *buffer = malloc(sizeof(struct Buffer));
     if(!buffer){
-        perror("malloc buffer");
+        // perror("malloc buffer");
         free(client);
         close(clientfd);
         return;
     }
     buffer->data = calloc(INITIAL_BUFF_CAPACITY, sizeof(char));
     if(!buffer->data){
-        perror("calloc buffer data");
+        // perror("calloc buffer data");
         free(buffer);
         free(client);
         close(clientfd);
@@ -260,7 +259,7 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
 
     // Add to event loop
     if(event_loop_add(loop, clientfd, EVENT_READABLE) == -1){
-        perror("event_loop_add");
+        // perror("event_loop_add");
         free(buffer->data);
         free(buffer);
         free(client);
@@ -270,7 +269,7 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
 
     // Add to client HashMap
     if(hm_insert(clients, client) != HM_OK){
-        fprintf(stderr, "Failed to insert client into registry\n");
+        // fprintf(stderr, "Failed to insert client into registry\n");
         event_loop_del(loop, clientfd, EVENT_READABLE);
         free(buffer->data);
         free(buffer);
@@ -280,13 +279,13 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     }
 
     inet_ntop(client_addr.ss_family, get_in_addr((struct sockaddr*)&client_addr), s, sizeof(s));
-    printf("server: got connection from %s (fd=%d, total clients=%zu)\n", s, clientfd, clients->item_count);
+    // printf("server: got connection from %s (fd=%d, total clients=%zu)\n", s, clientfd, clients->item_count);
 }
 
 void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, RedisStore *store, AOFManager *aof) {
     ClientState *client = NULL;
     if(hm_get(clients, (char *)&clientfd, sizeof(int), (void **)&client) != HM_OK || !client){
-        fprintf(stderr, "Client not found for fd %d\n", clientfd);
+        // fprintf(stderr, "Client not found for fd %d\n", clientfd);
         close_client(clientfd, loop, clients);
         return;
     }
@@ -314,7 +313,7 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
     
     if(n == 0) {
         // Client closed connection
-        printf("Client fd=%d closed connection\n", clientfd);
+        // printf("Client fd=%d closed connection\n", clientfd);
         close_client(clientfd, loop, clients);
         return;
     } else if (n < 0) {
@@ -324,7 +323,7 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
         if(errno == EINTR){
             return;
         }
-        perror("recv");
+        // perror("recv");
         close_client(clientfd, loop, clients);
         return;
     }
@@ -347,7 +346,7 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
             // Need more data
             break;
         } else if(consumed < 0){
-            fprintf(stderr, "[ERROR] Parse error: %zd\n", consumed);
+            // fprintf(stderr, "[ERROR] Parse error: %zd\n", consumed);
             char *msg;
             switch (consumed) {
                 case ERR_INVALID_TYPE:    msg = "Protocol error: expected '*', got other"; break;
@@ -388,7 +387,7 @@ void close_client(int clientfd, event_loop_t *loop, HashMap *clients) {
         }
         close(client->fd);
         free(client);
-        printf("Closed client fd=%d (remaining clients=%zu)\n", clientfd, clients->item_count);
+        // printf("Closed client fd=%d (remaining clients=%zu)\n", clientfd, clients->item_count);
     }
 }
 

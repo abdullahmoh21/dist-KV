@@ -228,8 +228,17 @@ SL_RESULT sl_delete(SkipList *list, const char *member, size_t member_len, doubl
 } 
 
 SkipListIterator sl_iterator_score(SkipList *list, double start, double end){
-    SkipListIterator it = {.current = NULL, .max = -1};
-    if (list == NULL || list->head == NULL) return it;
+    SkipListIterator it = {
+        .current = NULL,
+        .type = SL_ITER_BY_SCORE,
+        .max_score = end,
+        .has_max_score = 1,
+        .max_rank = 0,
+        .current_rank = 0,
+        .has_max_rank = 0
+    };
+
+    if (list == NULL || list->head == NULL || end < start) return it;
     
     // Find first node >= start
     SkipListNode *current = list->head;
@@ -243,8 +252,17 @@ SkipListIterator sl_iterator_score(SkipList *list, double start, double end){
 }
 
 SkipListIterator sl_iterator_rank(SkipList *list, long start, long end){
-    SkipListIterator it = {.current = NULL, .max = end};
-    if (list == NULL || list->head == NULL) return it;
+    SkipListIterator it = {
+        .current = NULL,
+        .type = SL_ITER_BY_RANK,
+        .max_score = 0,
+        .has_max_score = 0,
+        .max_rank = end,
+        .current_rank = start,
+        .has_max_rank = 1
+    };
+
+    if (list == NULL || list->head == NULL || start < 0 || end < start) return it;
     
     SkipListNode *current = list->head->forward[0];
     long rank = 0;
@@ -259,13 +277,26 @@ SkipListIterator sl_iterator_rank(SkipList *list, long start, long end){
     return it;
 }
 
-int sl_next(SkipListIterator *it){
-    if (it == NULL || it->current == NULL) return 0;
-    
+ZSetMember* sl_next(SkipListIterator *it){
+    if (it == NULL || it->current == NULL) return NULL;
+
+    if(it->type == SL_ITER_BY_SCORE && it->has_max_score && it->current->obj->score > it->max_score){
+        it->current = NULL;
+        return NULL;
+    }
+
+    if(it->type == SL_ITER_BY_RANK && it->has_max_rank && it->current_rank > it->max_rank){
+        it->current = NULL;
+        return NULL;
+    }
+
+    ZSetMember *out = it->current->obj;
     it->current = it->current->forward[0];
-    
-    if (it->current == NULL) return 0;
-    return 1;
+    if(it->type == SL_ITER_BY_RANK){
+        it->current_rank++;
+    }
+
+    return out;
 }
 
 SL_RESULT sl_free_shallow(SkipList *list){
@@ -301,7 +332,7 @@ static int _random_lvl(SkipList *list){
 // AI-GEN pretty printer updated for ZSetMember 
 static void _print_skiplist(SkipList *list) {
     if (!list || !list->head || !list->head->forward[0]) {
-        printf("(skip list empty or uninitialized)\n");
+        // printf("(skip list empty or uninitialized)\n");
         return;
     }
 
@@ -323,7 +354,7 @@ static void _print_skiplist(SkipList *list) {
         if (need > colw) colw = need;
     }
 
-    printf("\n--- Skip List Structure (Max Height: %d) ---\n", list->max_lvl);
+    // printf("\n--- Skip List Structure (Max Height: %d) ---\n", list->max_lvl);
 
     for (int lvl = list->max_lvl - 1; lvl >= 0; lvl--) {
         bool level_empty = true;
@@ -336,7 +367,7 @@ static void _print_skiplist(SkipList *list) {
         
         if (level_empty && lvl > 0) continue; 
 
-        printf("L%02d: ", lvl);
+        // printf("L%02d: ", lvl);
         for (i = 0; i < count; i++) {
             if (nodes[i]->height > lvl) {
                 char buf[128];
@@ -344,14 +375,14 @@ static void _print_skiplist(SkipList *list) {
                 snprintf(buf, sizeof(buf), "%.*s:%.1f(%d)", 
                          (int)nodes[i]->obj->key_len, nodes[i]->obj->key, 
                          nodes[i]->obj->score, nodes[i]->height);
-                printf("%-*s", colw, buf);
+                // printf("%-*s", colw, buf);
             } else {
-                printf("%-*s", colw, "-");
+                // printf("%-*s", colw, "-");
             }
         }
-        printf("\n");
+        // printf("\n");
     }
-    printf("-------------------------------------------\n\n");
+    // printf("-------------------------------------------\n\n");
 
     free(nodes);
 }

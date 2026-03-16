@@ -10,7 +10,6 @@ static size_t _hash_key(char *key, size_t key_len, size_t idx_space_len);
 static HM_RESULT _update_buffer_size(HashMap *hm);
 static HM_RESULT _rehash(HashMap *hm, size_t new_size);
 
-
 HashMap* hm_create(KeyView (*get_key_fn)(void *)){
     HashMap *hm = malloc(sizeof(HashMap));
     if(hm == NULL) {return NULL;}
@@ -111,6 +110,57 @@ HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out){
         current = current->next;
     }
     return HM_NOT_FOUND;
+}
+
+HM_RESULT hm_it_init(HashMap *hm, HMIterator *out_it){
+    if(hm == NULL || out_it == NULL){
+        return HM_ERR;
+    }
+
+    out_it->map = hm;
+    out_it->bucket_idx = 0;
+    out_it->current_node = NULL;
+
+    for(size_t i = 0; i < hm->size; i++){
+        if(hm->buckets[i] != NULL){
+            out_it->bucket_idx = i;
+            out_it->current_node = hm->buckets[i];
+            break;
+        }
+    }
+
+    return HM_OK;
+}
+
+HM_RESULT hm_it_next(HMIterator *it, void **out){
+    if(it == NULL || it->map == NULL || out == NULL){
+        return HM_ERR;
+    }
+
+    if(it->current_node == NULL){
+        *out = NULL;
+        return HM_NOT_FOUND;
+    }
+
+    HashMap *map = it->map;
+    HashNode *node = it->current_node;
+    *out = node->val;
+
+    if(node->next != NULL){
+        it->current_node = node->next;
+        return HM_OK;
+    }
+
+    for(size_t i = it->bucket_idx + 1; i < map->size; i++){
+        if(map->buckets[i] != NULL){
+            it->bucket_idx = i;
+            it->current_node = map->buckets[i];
+            return HM_OK;
+        }
+    }
+
+    it->current_node = NULL;
+    return HM_OK;
 }
 
 HM_RESULT hm_free_shallow(HashMap *hm){

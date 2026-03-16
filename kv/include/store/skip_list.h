@@ -16,9 +16,19 @@ typedef struct SkipList {
     size_t size;
 } SkipList;
 
+typedef enum {
+    SL_ITER_BY_SCORE,
+    SL_ITER_BY_RANK
+} SLIteratorType;
+
 typedef struct SkipListIterator {
     SkipListNode *current;
-    long max;
+    SLIteratorType type;
+    double max_score;
+    int has_max_score;
+    long max_rank;
+    long current_rank;
+    int has_max_rank;
 } SkipListIterator;
 
 typedef enum {
@@ -41,5 +51,5 @@ SL_RESULT sl_delete(SkipList *list, const char *member, size_t member_len, doubl
 SkipListIterator sl_iterator_score(SkipList *list, double start, double end);
 SkipListIterator sl_iterator_rank(SkipList *list, long start, long end);
 SL_RESULT sl_free_shallow(SkipList *list);
-int sl_next(SkipListIterator *it);
+ZSetMember* sl_next(SkipListIterator *it);
 #endif
