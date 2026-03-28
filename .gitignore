@@ -2,8 +2,12 @@
 .vscode/
 *.dSYM/
 *.o
+*.md
+!README.md
 build/
+benchmarks/
 appendonly.aof
+compacted.tmp
 
 # Standard OS junk
 .DS_Store

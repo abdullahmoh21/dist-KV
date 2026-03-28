@@ -36,6 +36,7 @@ struct FlagMap {
 
 
 typedef ExecuteResult (*CommandFunc)(int clientfd, struct RedisCommand *cmd, RedisStore *store);
+typedef ExecuteResult (*ReplyWriteFn)(int clientfd, const char *data, size_t len, void *ctx);
 struct CommandEntry {
     const char *name;       
     size_t name_len;        
@@ -55,4 +56,5 @@ ExecuteResult sendInt(int clientfd, int integerToSend);
 ExecuteResult sendArrayHeader(int clientfd, int count);
 ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len);
 ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count);
+void ee_set_reply_writer(ReplyWriteFn writer, void *ctx);
 #endif

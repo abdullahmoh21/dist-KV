@@ -18,25 +18,39 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
 
 #define PORT "6379"
 #define BACKLOG 10
 #define EXPANSION_THRESH 10
 #define MAX_EVENTS 128
+#define INITIAL_OUT_BUFF_CAPACITY 4096
+#define MAX_CLIENT_OUTPUT_BUFF_LEN (64 * 1024 * 1024)
 
 // Client connection state
 typedef struct {
     int fd;
+    int event_mask;         // cached event mask — avoids redundant event_loop_mod syscalls
     struct Buffer *buffer;
+    struct Buffer *out_buffer;
+    int output_overflow;
 } ClientState;
+
+// Set before dispatch_command so reply writer can find the client without a hashmap lookup
+static ClientState *g_current_client = NULL;
 
 // Prototypes
 int set_nonblocking(int fd);
 KeyView get_client_key(void *client_ptr);
 void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, RedisStore *store);
 void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, RedisStore *store, AOFManager *aof);
+void handle_client_write(int clientfd, event_loop_t *loop, HashMap *clients);
 void close_client(int clientfd, event_loop_t *loop, HashMap *clients);
 void *get_in_addr(struct sockaddr *sa);
+static ExecuteResult server_reply_write(int clientfd, const char *data, size_t len, void *ctx);
+static int append_client_output(ClientState *client, const char *data, size_t len);
+static ExecuteResult flush_client_output(ClientState *client);
+static int update_client_event_mask(ClientState *client, event_loop_t *loop);
 
 int main(void){
     int serverfd;
@@ -63,6 +77,8 @@ int main(void){
         fprintf(stderr, "Failed to create client registry\n");
         return 1;
     }
+
+    ee_set_reply_writer(server_reply_write, clients);
 
     AOFManager *aof;
     if(aof_create(&aof) != AOF_OK){
@@ -162,9 +178,15 @@ int main(void){
             if(fd == serverfd){
                 // New connection
                 handle_new_connection(serverfd, loop, clients, &store);
-            } else if(mask & EVENT_READABLE){
-                // Data available on client socket
-                handle_client_read(fd, loop, clients, &store, aof);
+            } else {
+                if(mask & EVENT_READABLE){
+                    // Data available on client socket
+                    handle_client_read(fd, loop, clients, &store, aof);
+                }
+                if(mask & EVENT_WRITABLE){
+                    // Pending response data can be flushed
+                    handle_client_write(fd, loop, clients);
+                }
             }
         }
 
@@ -225,6 +247,11 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
         return;
     }
 
+    // Disable Nagle's algorithm — send responses immediately without waiting to
+    // coalesce small packets. Prevents 40ms delayed-ACK stalls on real networks.
+    int nodelay = 1;
+    setsockopt(clientfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
     // Allocate client state
     ClientState *client = malloc(sizeof(ClientState));
     if(!client){
@@ -234,6 +261,7 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     }
     
     client->fd = clientfd;
+    client->event_mask = EVENT_READABLE;
 
     // Initialize buffer for this client
     struct Buffer *buffer = malloc(sizeof(struct Buffer));
@@ -257,9 +285,37 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     buffer->read_idx = 0;
     client->buffer = buffer;
 
+    struct Buffer *out_buffer = malloc(sizeof(struct Buffer));
+    if(!out_buffer){
+        free(buffer->data);
+        free(buffer);
+        free(client);
+        close(clientfd);
+        return;
+    }
+
+    out_buffer->data = calloc(INITIAL_OUT_BUFF_CAPACITY, sizeof(char));
+    if(!out_buffer->data){
+        free(out_buffer);
+        free(buffer->data);
+        free(buffer);
+        free(client);
+        close(clientfd);
+        return;
+    }
+
+    out_buffer->capacity = INITIAL_OUT_BUFF_CAPACITY;
+    out_buffer->max_capacity = MAX_CLIENT_OUTPUT_BUFF_LEN;
+    out_buffer->used = 0;
+    out_buffer->read_idx = 0;
+    client->out_buffer = out_buffer;
+    client->output_overflow = 0;
+
     // Add to event loop
     if(event_loop_add(loop, clientfd, EVENT_READABLE) == -1){
         // perror("event_loop_add");
+        free(out_buffer->data);
+        free(out_buffer);
         free(buffer->data);
         free(buffer);
         free(client);
@@ -271,6 +327,8 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
     if(hm_insert(clients, client) != HM_OK){
         // fprintf(stderr, "Failed to insert client into registry\n");
         event_loop_del(loop, clientfd, EVENT_READABLE);
+        free(out_buffer->data);
+        free(out_buffer);
         free(buffer->data);
         free(buffer);
         free(client);
@@ -285,24 +343,28 @@ void handle_new_connection(int serverfd, event_loop_t *loop, HashMap *clients, R
 void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, RedisStore *store, AOFManager *aof) {
     ClientState *client = NULL;
     if(hm_get(clients, (char *)&clientfd, sizeof(int), (void **)&client) != HM_OK || !client){
-        // fprintf(stderr, "Client not found for fd %d\n", clientfd);
         close_client(clientfd, loop, clients);
         return;
     }
+
+    // Expose client to reply writer — avoids a hashmap lookup per write call
+    g_current_client = client;
 
     struct Buffer *ib = client->buffer;
 
     if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
         // Try removing used data
         size_t remaining = ib->used - ib->read_idx;
-        memmove(ib->data, ib->data + ib->read_idx, remaining);    
+        memmove(ib->data, ib->data + ib->read_idx, remaining);
         ib->read_idx = 0;
         ib->used = remaining;
-        
+
         // Still need more -> expand buffer
         if(ib->capacity - ib->used <= (ib->capacity * EXPANSION_THRESH) / 100){
             if(!expand_buffer(ib)){
                 sendError(clientfd, "Server error: failed to expand input buffer");
+                flush_client_output(client);
+                g_current_client = NULL;
                 close_client(clientfd, loop, clients);
                 return;
             }
@@ -310,27 +372,25 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
     }
 
     ssize_t n = recv(clientfd, ib->data + ib->used, ib->capacity - ib->used, 0);
-    
+
     if(n == 0) {
-        // Client closed connection
-        // printf("Client fd=%d closed connection\n", clientfd);
+        g_current_client = NULL;
         close_client(clientfd, loop, clients);
         return;
     } else if (n < 0) {
-        if(errno == EAGAIN || errno == EWOULDBLOCK){
+        if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR){
+            g_current_client = NULL;
             return;
         }
-        if(errno == EINTR){
-            return;
-        }
-        // perror("recv");
+        g_current_client = NULL;
         close_client(clientfd, loop, clients);
         return;
     }
 
     ib->used += n;
-  
-    // Parse and execute commands
+
+    // Parse and execute all commands from this recv batch.
+    // Responses accumulate in the output buffer; we flush once after the loop.
     while(ib->read_idx < ib->used){
         struct RedisCommand command;
         char *start_buff = ib->data + ib->read_idx;
@@ -340,13 +400,14 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
         if(consumed == 0){
             if (ib->read_idx == 0 && ib->used == ib->capacity && ib->capacity >= ib->max_capacity) {
                 sendError(clientfd, "Protocol error: max input buffer length exceeded");
+                flush_client_output(client);
+                g_current_client = NULL;
                 close_client(clientfd, loop, clients);
                 return;
             }
             // Need more data
             break;
         } else if(consumed < 0){
-            // fprintf(stderr, "[ERROR] Parse error: %zd\n", consumed);
             char *msg;
             switch (consumed) {
                 case ERR_INVALID_TYPE:    msg = "Protocol error: expected '*', got other"; break;
@@ -359,19 +420,145 @@ void handle_client_read(int clientfd, event_loop_t *loop, HashMap *clients, Redi
                 default:                  msg = "Protocol error: unknown error"; break;
             }
             sendError(clientfd, msg);
+            flush_client_output(client);
+            g_current_client = NULL;
             close_client(clientfd, loop, clients);
             return;
         }
-        
+
         ExecuteResult res = dispatch_command(clientfd, &command, store);
 
         if(res == EE_WRITE_OK){
             aof_add(aof, &command);
         }
 
+        if (client->output_overflow) {
+            free_command(&command);
+            g_current_client = NULL;
+            close_client(clientfd, loop, clients);
+            return;
+        }
+
         ib->read_idx += (size_t) consumed;
         free_command(&command);
     }
+
+    g_current_client = NULL;
+
+    // Flush all accumulated responses in one shot, then update the event mask once.
+    ExecuteResult flush_res = flush_client_output(client);
+    if (flush_res == EE_SOCK_CLOSED || flush_res == EE_ERR) {
+        close_client(clientfd, loop, clients);
+        return;
+    }
+    if (update_client_event_mask(client, loop) == -1) {
+        close_client(clientfd, loop, clients);
+    }
+}
+
+void handle_client_write(int clientfd, event_loop_t *loop, HashMap *clients) {
+    ClientState *client = NULL;
+    if (hm_get(clients, (char *)&clientfd, sizeof(int), (void **)&client) != HM_OK || !client) {
+        return;
+    }
+
+    ExecuteResult flush_res = flush_client_output(client);
+    if (flush_res == EE_SOCK_CLOSED || flush_res == EE_ERR) {
+        close_client(clientfd, loop, clients);
+        return;
+    }
+
+    if (update_client_event_mask(client, loop) == -1) {
+        close_client(clientfd, loop, clients);
+    }
+}
+
+static ExecuteResult server_reply_write(int clientfd, const char *data, size_t len, void *ctx) {
+    (void)ctx;
+    if (clientfd == -1) return EE_OK;
+
+    // g_current_client is set by handle_client_read before dispatch_command — no hashmap lookup needed
+    ClientState *client = g_current_client;
+    if (!client || client->output_overflow) return EE_ERR;
+
+    if (!append_client_output(client, data, len)) {
+        client->output_overflow = 1;
+        return EE_ERR;
+    }
+    return EE_OK;
+}
+
+static int append_client_output(ClientState *client, const char *data, size_t len) {
+    if (len == 0) {
+        return 1;
+    }
+
+    struct Buffer *ob = client->out_buffer;
+    if (!ob) {
+        return 0;
+    }
+
+    if (ob->read_idx == ob->used) {
+        ob->read_idx = 0;
+        ob->used = 0;
+    }
+
+    if (ob->read_idx > 0 && (ob->capacity - ob->used) < len) {
+        size_t pending = ob->used - ob->read_idx;
+        memmove(ob->data, ob->data + ob->read_idx, pending);
+        ob->read_idx = 0;
+        ob->used = pending;
+    }
+
+    size_t needed = ob->used + len;
+    if (needed > ob->capacity) {
+        if (!expand_buffer_to(ob, needed)) {
+            return 0;
+        }
+    }
+
+    memcpy(ob->data + ob->used, data, len);
+    ob->used += len;
+    return 1;
+}
+
+static ExecuteResult flush_client_output(ClientState *client) {
+    if (!client || !client->out_buffer) {
+        return EE_ERR;
+    }
+
+    struct Buffer *ob = client->out_buffer;
+    while (ob->read_idx < ob->used) {
+        size_t pending = ob->used - ob->read_idx;
+        ssize_t n = send(client->fd, ob->data + ob->read_idx, pending, MSG_NOSIGNAL);
+        if (n == -1) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return EE_OK;
+            }
+            return EE_ERR;
+        }
+        if (n == 0) {
+            return EE_SOCK_CLOSED;
+        }
+
+        ob->read_idx += (size_t)n;
+    }
+
+    ob->read_idx = 0;
+    ob->used = 0;
+    return EE_OK;
+}
+
+static int update_client_event_mask(ClientState *client, event_loop_t *loop) {
+    int mask = EVENT_READABLE;
+    if (client->out_buffer && client->out_buffer->read_idx < client->out_buffer->used) {
+        mask |= EVENT_WRITABLE;
+    }
+    // Skip the event_loop_mod syscall when the mask hasn't changed
+    if (mask == client->event_mask) return 0;
+    client->event_mask = mask;
+    return event_loop_mod(loop, client->fd, mask);
 }
 
 void close_client(int clientfd, event_loop_t *loop, HashMap *clients) {
@@ -384,6 +571,10 @@ void close_client(int clientfd, event_loop_t *loop, HashMap *clients) {
         if(client->buffer){
             free(client->buffer->data);
             free(client->buffer);
+        }
+        if(client->out_buffer){
+            free(client->out_buffer->data);
+            free(client->out_buffer);
         }
         close(client->fd);
         free(client);

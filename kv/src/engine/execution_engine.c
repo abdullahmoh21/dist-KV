@@ -6,6 +6,12 @@
 #include "parser/resp_parser.h"
 #include "store/redis_store.h"
 #include "engine/execution_engine.h"
+#include "utils/fast_format.h"
+#include "utils/fast_parse.h"
+
+// Values up to this many bytes are formatted into a single stack buffer so
+// sendBulkString becomes one write call instead of three.
+#define BULK_INLINE_MAX 4096
 
 
 // prototypes
@@ -18,6 +24,14 @@ ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count);
 static ExecuteResult _sendRaw(int clientfd, const char *buff, size_t len);
 static ExecuteResult _parseDouble(BulkString *str, double *out);
 static ExecuteResult _validate_key_sizes(int clientfd, RedisCommand *command, const struct CommandEntry *entry);
+
+static ReplyWriteFn g_reply_writer = NULL;
+static void *g_reply_writer_ctx = NULL;
+
+void ee_set_reply_writer(ReplyWriteFn writer, void *ctx) {
+    g_reply_writer = writer;
+    g_reply_writer_ctx = ctx;
+}
 
 // Command handler prototypes
 static ExecuteResult exec_get(int clientfd, RedisCommand *command, RedisStore *store);
@@ -392,36 +406,46 @@ ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count){
 }
 
 ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len){
-    if(clientfd == -1){ 
+    if(clientfd == -1){
         return EE_OK;
     }
-    char b_buff[32];
+    // Small values: format "$N\r\n<data>\r\n" into a stack buffer and make one write.
+    // Large values: three writes — they land contiguous in the output buffer and are
+    // sent together by flush_client_output, so correctness is identical.
+    if (data_len <= BULK_INLINE_MAX) {
+        char buf[BULK_INLINE_MAX + 25]; // 25 = '$' + 20 digits + "\r\n" + "\r\n"
+        int hdr_len = fmt_bulk_hdr(buf, data_len);
+        memcpy(buf + hdr_len, data, data_len);
+        buf[hdr_len + data_len]     = '\r';
+        buf[hdr_len + data_len + 1] = '\n';
+        return _sendRaw(clientfd, buf, (size_t)hdr_len + data_len + 2);
+    }
 
-    int b_len = snprintf(b_buff, sizeof(b_buff), "$%zu\r\n", data_len);
-    if (b_len < 0 || (u_long) b_len >= sizeof(b_buff)) return EE_ERR;
-
-    ExecuteResult size_sent = _sendRaw(clientfd, b_buff, b_len);
-    if(size_sent != EE_OK) return size_sent;   
-    
-    ExecuteResult data_sent = _sendRaw(clientfd, data, data_len);
-    if(data_sent != EE_OK) return data_sent;
-
-    const char *rn = "\r\n";
-    ExecuteResult rn_sent = _sendRaw(clientfd, rn, 2);
-    if(rn_sent != EE_OK) return rn_sent;
-    return EE_OK;
+    char hdr[23];
+    int hdr_len = fmt_bulk_hdr(hdr, data_len);
+    ExecuteResult r = _sendRaw(clientfd, hdr, (size_t)hdr_len);
+    if (r != EE_OK) return r;
+    r = _sendRaw(clientfd, data, data_len);
+    if (r != EE_OK) return r;
+    return _sendRaw(clientfd, "\r\n", 2);
 }
 
 static ExecuteResult _sendRaw(int clientfd, const char *buff, size_t len){
     if(clientfd == -1){ 
         return EE_OK;
     }
+    if (g_reply_writer) {
+        return g_reply_writer(clientfd, buff, len, g_reply_writer_ctx);
+    }
+
     size_t total_sent = 0;
     while(total_sent < len){
         ssize_t n = send(clientfd, buff + total_sent, len - total_sent, MSG_NOSIGNAL);
         if (n == -1) {
             if (errno == EINTR) continue; 
-            if (errno == EAGAIN) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return EE_ERR;
+            }
             // fprintf(stderr, "[ERROR] send() failed: %s (errno=%d)\n", strerror(errno), errno);
             return EE_ERR;
         } else if(n == 0){
@@ -434,23 +458,9 @@ static ExecuteResult _sendRaw(int clientfd, const char *buff, size_t len){
 }
 
 ExecuteResult _parseDouble(BulkString *str, double *out) {
-    char *endptr;
-    char temp[64];
-    
-    if (str->len >= sizeof(temp)) {
+    if (fast_strtod(str->data, str->len, out) != 0) {
         return EE_ERR;
     }
-    
-    memcpy(temp, str->data, str->len);
-    temp[str->len] = '\0';
-    
-    errno = 0;
-    *out = strtod(temp, &endptr);
-    
-    if (errno != 0 || endptr == temp || *endptr != '\0') {
-        return EE_ERR;
-    }
-    
     return EE_OK;
 }
 

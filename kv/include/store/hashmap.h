@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DEFAULT_SIZE 100
+#define DEFAULT_SIZE 64
 #define EXPAND_THRESH .75
 #define SHRINK_THRESH .20
 

@@ -9,17 +9,20 @@
 static size_t _hash_key(char *key, size_t key_len, size_t idx_space_len);
 static HM_RESULT _update_buffer_size(HashMap *hm);
 static HM_RESULT _rehash(HashMap *hm, size_t new_size);
+static int _is_power_of_two(size_t n);
+static size_t _next_power_of_two(size_t n);
 
 HashMap* hm_create(KeyView (*get_key_fn)(void *)){
+    size_t initial_size = _next_power_of_two(DEFAULT_SIZE);
     HashMap *hm = malloc(sizeof(HashMap));
     if(hm == NULL) {return NULL;}
-    HashNode **buckets = calloc(DEFAULT_SIZE, sizeof(HashNode*));
+    HashNode **buckets = calloc(initial_size, sizeof(HashNode*));
     if(buckets == NULL) {
         free(hm);
         return NULL;
     }
     hm->buckets = buckets;
-    hm->size = DEFAULT_SIZE;
+    hm->size = initial_size;
     hm->item_count = 0;
     hm->get_key = get_key_fn; // Store the translator function
     return hm;
@@ -180,29 +183,63 @@ HM_RESULT hm_free_shallow(HashMap *hm){
 }
 
 size_t _hash_key(char *key, size_t key_len, size_t idx_space_len) {
+    if(idx_space_len == 0) {
+        return 0;
+    }
+
     size_t hash = FNV_OFFSET; 
     for(size_t i = 0; i<key_len; i++) {
         hash ^= (unsigned char)(*key++);
         hash *= FNV_PRIME;
     }
-    return hash % idx_space_len;
+
+    return hash & (idx_space_len - 1);
 }
 
 HM_RESULT _update_buffer_size(HashMap *hm){
     if (hm->size == 0) return HM_ERR;
+
+    size_t min_size = _next_power_of_two(DEFAULT_SIZE);
+
+    if(!_is_power_of_two(hm->size)) {
+        size_t normalized_size = _next_power_of_two(hm->size);
+        if(normalized_size < min_size) {
+            normalized_size = min_size;
+        }
+        return _rehash(hm, normalized_size);
+    }
+
     double load_factor = (double) hm->item_count / hm->size;
     if(load_factor > EXPAND_THRESH) {
-        return _rehash(hm, hm->size * 2); 
+        return _rehash(hm, hm->size << 1); 
     } else if(load_factor < SHRINK_THRESH){
-        if (hm->size <= DEFAULT_SIZE) {
+        if (hm->size <= min_size) {
             return HM_OK;
         }
-        return _rehash(hm, hm->size / 2);
+
+        size_t target_size = hm->size >> 1;
+        if(target_size < min_size) {
+            target_size = min_size;
+        }
+        return _rehash(hm, target_size);
     }
     return HM_OK;
 }
 
 HM_RESULT _rehash(HashMap *hm, size_t new_size){
+    size_t min_size = _next_power_of_two(DEFAULT_SIZE);
+    if(new_size < min_size) {
+        new_size = min_size;
+    }
+
+    if(!_is_power_of_two(new_size)) {
+        new_size = _next_power_of_two(new_size);
+    }
+
+    if(new_size == hm->size) {
+        return HM_OK;
+    }
+
     HashNode **old_buckets = hm->buckets;
     size_t old_size = hm->size;
     
@@ -233,4 +270,27 @@ HM_RESULT _rehash(HashMap *hm, size_t new_size){
     }
     free(old_buckets);
     return HM_OK;
+}
+
+static int _is_power_of_two(size_t n) {
+    return n != 0 && (n & (n - 1)) == 0;
+}
+
+static size_t _next_power_of_two(size_t n) {
+    if(n <= 1) {
+        return 1;
+    }
+
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    if(sizeof(size_t) > 4) {
+        n |= n >> 32;
+    }
+    n++;
+
+    return n;
 }

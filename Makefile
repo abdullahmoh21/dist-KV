@@ -41,6 +41,8 @@ SERVER_SRCS = $(SERVER_SRC_DIR)/server.c \
               $(SERVER_SRC_DIR)/store/redis_store.c \
               $(SERVER_SRC_DIR)/store/skip_list.c \
 			  $(SERVER_SRC_DIR)/utils/time.c \
+			  $(SERVER_SRC_DIR)/utils/fast_format.c \
+			  $(SERVER_SRC_DIR)/utils/fast_parse.c \
 			  $(SERVER_SRC_DIR)/aof/aof.c \
 			  $(SERVER_SRC_DIR)/aof/aof_manager.c \
 			  $(SERVER_SRC_DIR)/aof/aof_load.c \
@@ -123,6 +125,11 @@ debug: clean all
 release: CFLAGS = -Wall -Wextra -std=c11 -O3 -DNDEBUG
 release: clean all
 
+# Profile build (optimized with frame pointers for profilers)
+.PHONY: profile
+profile: CFLAGS = -O3 -g -fno-omit-frame-pointer
+profile: clean all
+
 # Display help information
 .PHONY: help
 help:
@@ -134,6 +141,7 @@ help:
 	@echo "  clean        - Remove all build artifacts"
 	@echo "  rebuild      - Clean and rebuild"
 	@echo "  debug        - Build with debug flags"
+	@echo "  profile      - Build with profiling flags"
 	@echo "  release      - Build optimized release version"
 	@echo "  run-server   - Build and run the server"
 	@echo "  run-client   - Build and run the client"
