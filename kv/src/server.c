@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/tcp.h>
+#include <sys/stat.h>
 
 #define PORT "6379"
 #define BACKLOG 10
@@ -194,6 +195,80 @@ int main(void){
         if(now_ms >= next_flush_ms){
             if(aof_check_flush(aof) == AOF_OK){
                 next_flush_ms = now_ms + 1000;
+            }
+        }
+        
+        // check if we need to spawn aof_compact process
+        if(aof->child_pid > 0){
+            int status;
+            pid_t pid = waitpid(aof->child_pid, &status, WNOHANG);
+            if(pid > 0){
+                if(!(WIFEXITED(status) && WEXITSTATUS(status) == 0)){
+                    fprintf(stderr, "[AOF] compaction child %d failed (status=%d), recovering tmp.aof -> appendonly.aof\n", aof->child_pid, status);
+                    if(aof_recover_on_compact_fail(aof) != AOF_OK){
+                        fprintf(stderr, "[AOF] recovery failed — writes in tmp.aof may be lost\n");
+                    } else {
+                        fprintf(stderr, "[AOF] recovery ok, file_size=%llu\n", (unsigned long long)aof->file_size);
+                    }
+                    aof->last_compaction_file_size = aof->file_size;
+                    aof->child_pid = -1;
+                    hm_resume_resize(store.dict);
+                    continue;
+                }
+
+                fprintf(stderr, "[AOF] compaction child done, merging tmp.aof -> compacted.aof\n");
+                aof_force_flush(aof);
+
+                if(aof_merge_compacted(aof) != AOF_OK){
+                    fprintf(stderr, "[AOF] merge failed\n");
+                    aof->child_pid = -1;
+                    hm_resume_resize(store.dict);
+                    continue;
+                }
+
+                rename("compacted.aof", "appendonly.aof");
+
+                int new_fd = open("appendonly.aof", O_WRONLY | O_APPEND);
+                int old_fd = aof->fd;
+                aof_redirect(aof, new_fd);
+                close(old_fd);
+                unlink("tmp.aof");
+
+                struct stat st;
+                fstat(new_fd, &st);
+                aof->file_size = st.st_size;
+                aof->last_compaction_file_size = st.st_size;
+                aof->child_pid = -1;
+                hm_resume_resize(store.dict);
+                fprintf(stderr, "[AOF] compaction complete, new file_size=%llu bytes\n", (unsigned long long)st.st_size);
+            }
+        } else if(aof_check_compact(aof) == AOF_OK){
+            int aof_fd = open("tmp.aof", O_WRONLY | O_CREAT | O_APPEND | O_TRUNC, 0644);
+            if (aof_fd == -1) {
+                perror("open tmp.aof");
+            }
+
+            int old_fd = aof->fd;
+            aof_redirect(aof, aof_fd);
+            close(old_fd);
+
+            fprintf(stderr, "[AOF] triggering compaction: file_size=%llu last_compaction=%llu\n",
+                (unsigned long long)aof->file_size,
+                (unsigned long long)aof->last_compaction_file_size);
+
+            hm_pause_resize(store.dict);
+
+            pid_t pid = fork();
+            
+            if(pid == 0){
+                aof_compact(&store);
+            } else if(pid > 0){
+                aof->child_pid = pid;
+                fprintf(stderr, "[AOF] compaction child spawned pid=%d\n", pid);
+            } else {
+                perror("[AOF] fork failed");
+                hm_resume_resize(store.dict);
+                aof->child_pid = -1;
             }
         }
     }

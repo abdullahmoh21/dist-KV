@@ -147,6 +147,11 @@ help:
 	@echo "  run-client   - Build and run the client"
 	@echo "  help         - Display this help message"
 
+# Run the isolated AOF compaction test (starts server, bloats AOF, tests compact)
+.PHONY: test-compact
+test-compact:
+	@bash scripts/run_compact_test.sh
+
 # Alias targets
 .PHONY: server client
 server: $(SERVER_BIN)

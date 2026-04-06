@@ -77,15 +77,8 @@ char* itoa(uint64_t val, char* buf) {
 // Helper to write "$<len>\r\n" directly into the buffer
 void _append_len(struct Buffer *buf, size_t len) {
     buf->data[buf->used++] = '$';
-    
-    char *end_of_window = buf->data + buf->used + 20; 
-    char *start = itoa((uint64_t)len, end_of_window);
-    
-    size_t digit_count = (size_t)(end_of_window - start);
-    
-    memmove(buf->data + buf->used, start, digit_count);
-    buf->used += digit_count;
-
+    char *end = __write_size_t(buf->data + buf->used, len);
+    buf->used = (size_t)(end - buf->data);
     buf->data[buf->used++] = '\r';
     buf->data[buf->used++] = '\n';
 }

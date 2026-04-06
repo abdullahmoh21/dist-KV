@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>

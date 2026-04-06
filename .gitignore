@@ -6,6 +6,7 @@
 !README.md
 build/
 benchmarks/
+notes/
 appendonly.aof
 compacted.tmp
 

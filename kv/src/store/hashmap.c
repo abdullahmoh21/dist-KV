@@ -198,6 +198,7 @@ size_t _hash_key(char *key, size_t key_len, size_t idx_space_len) {
 
 HM_RESULT _update_buffer_size(HashMap *hm){
     if (hm->size == 0) return HM_ERR;
+    if (hm->resize_paused) return HM_OK;
 
     size_t min_size = _next_power_of_two(DEFAULT_SIZE);
 
@@ -268,7 +269,9 @@ HM_RESULT _rehash(HashMap *hm, size_t new_size){
             current = next;
         }
     }
-    free(old_buckets);
+    if (!hm->resize_paused) {
+        free(old_buckets);
+    }
     return HM_OK;
 }
 
@@ -293,4 +296,12 @@ static size_t _next_power_of_two(size_t n) {
     n++;
 
     return n;
+}
+
+void hm_pause_resize(HashMap *hm) {
+    if (hm) hm->resize_paused = 1;
+}
+
+void hm_resume_resize(HashMap *hm) {
+    if (hm) hm->resize_paused = 0;
 }

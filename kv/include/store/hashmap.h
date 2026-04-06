@@ -31,8 +31,9 @@ typedef struct HashNode {
 typedef struct HashMap {
     HashNode **buckets;
     size_t size;
-    size_t item_count; 
+    size_t item_count;
     KeyView (*get_key)(void *val);
+    int resize_paused;
 } HashMap;
 
 typedef enum {
@@ -57,4 +58,6 @@ HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out);
 HM_RESULT hm_it_init(HashMap *hm, HMIterator *out_it);
 HM_RESULT hm_it_next(HMIterator *it, void **out);
 HM_RESULT hm_free_shallow(HashMap *hm);
+void hm_pause_resize(HashMap *hm);
+void hm_resume_resize(HashMap *hm);
 #endif

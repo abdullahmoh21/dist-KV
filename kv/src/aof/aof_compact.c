@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/mman.h>
+
+#define COMPACT_BUF_SIZE (4ULL * 1024 * 1024)
 
 // --- Forward Declarations ---
 static enum AOF_RESULT _buffer_ensure_space(int fd, struct Buffer *buf, size_t needed);
@@ -33,37 +36,55 @@ static enum AOF_RESULT _buffer_ensure_space(int fd, struct Buffer *buf, size_t n
 }
 
 // --- Compaction Entry Point ---
-// will be forked 
 void aof_compact(RedisStore *store) {
-    int aof_fd = open("compacted.temp", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    // Log initial AOF size
+    struct stat aof_stat;
+    off_t initial_aof_size = 0;
+    if (stat("appendonly.aof", &aof_stat) == 0) {
+        initial_aof_size = aof_stat.st_size;
+    }
+    fprintf(stderr, "[AOF child] starting compaction — initial AOF size: %lld bytes\n",
+            (long long)initial_aof_size);
+
+    int aof_fd = open("compacted.aof", O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
     if (aof_fd == -1) {
-        // perror("open");
+        perror("[AOF child] open compacted.aof");
         exit(1);
     }
 
-    struct Buffer *buf = malloc(sizeof(struct Buffer));
-    if (!buf) {
+    // mmap instead of malloc — malloc is not safe after fork() in a multithreaded
+    // process because the allocator lock may be held by a thread that no longer
+    // exists in the child. mmap(MAP_ANON) bypasses the allocator entirely.
+    size_t map_size = sizeof(struct Buffer) + COMPACT_BUF_SIZE;
+    void *mem = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) {
+        perror("[AOF child] mmap");
         close(aof_fd);
-        exit(1);
+        _exit(1);
     }
 
-    buf->data = calloc(1, CLIENT_INPUT_BUFF_LEN);
-    if (!buf->data) {
-        free(buf);
-        close(aof_fd);
-        exit(1);
-    }
-
-    buf->capacity = CLIENT_INPUT_BUFF_LEN;
-    buf->max_capacity = MAX_CLIENT_INPUT_BUFF_LEN;
+    struct Buffer *buf = (struct Buffer *)mem;
+    buf->data = (char *)mem + sizeof(struct Buffer);
+    buf->capacity = COMPACT_BUF_SIZE;
+    buf->max_capacity = COMPACT_BUF_SIZE;  // no expansion — flush to disk instead
     buf->used = 0;
     buf->read_idx = 0;
 
     HMIterator h_it;
     hm_it_init(store->dict, &h_it);
-    
+
     void *current = NULL;
     int success = 1;
+    size_t initial_commands = 0;
+    size_t compacted_commands = 0;
+
+    // Count total commands in the initial AOF (one per store entry as a baseline)
+    HMIterator count_it;
+    hm_it_init(store->dict, &count_it);
+    void *tmp = NULL;
+    while (hm_it_next(&count_it, &tmp) == HM_OK) initial_commands++;
+    fprintf(stderr, "[AOF child] initial AOF: size=%lld bytes, entries=%zu\n",
+            (long long)initial_aof_size, initial_commands);
 
     // walk the store
     while (hm_it_next(&h_it, &current) == HM_OK) {
@@ -72,26 +93,141 @@ void aof_compact(RedisStore *store) {
 
         if (obj->type == T_KV) {
             res = _write_kv_compaction(aof_fd, buf, obj);
+            if (res == AOF_OK) compacted_commands++;
         } else if (obj->type == T_ZSET) {
             res = _write_zset_compaction(aof_fd, buf, obj);
+            if (res == AOF_OK) {
+                struct Zset *zset = (struct Zset *)obj->data;
+                size_t member_count = zset->hm->item_count;
+                compacted_commands += (member_count + ZSET_BATCH_SIZE - 1) / ZSET_BATCH_SIZE;
+            }
         }
 
         if (res != AOF_OK) {
             success = 0;
-            break; 
+            break;
         }
     }
 
     if (success) {
         _flush_buffer_to_disk(aof_fd, buf);
-        fsync(aof_fd); 
+        fsync(aof_fd);
+        off_t compacted_size = lseek(aof_fd, 0, SEEK_END);
+        fprintf(stderr, "[AOF child] compaction done — compacted AOF: size=%lld bytes, commands=%zu\n",
+                (long long)compacted_size, compacted_commands);
+    } else {
+        fprintf(stderr, "[AOF child] compaction failed\n");
     }
 
-    free(buf->data);
-    free(buf);
+    munmap(mem, map_size);
     close(aof_fd);
+
+    _exit(success ? 0 : 1);
+}
+
+enum AOF_RESULT aof_merge_compacted(AOFManager *aof){                                                                                                    
+  int src = open("tmp.aof", O_RDONLY);             
+  if(src == -1){
+    return AOF_ERR;
+  }        
+
+  int dst = open("compacted.aof", O_WRONLY | O_APPEND);          
+  if(dst == -1){
+    close(src);
+    return AOF_ERR;
+  }                                                                            
+                                                                                                                                              
+  char buf[65536];                                                                                                                            
+  ssize_t n;                                                                                                                                  
+  while ((n = read(src, buf, sizeof(buf))) > 0) {                                                                                             
+      ssize_t written = 0;                                                                                                                    
+      while (written < n) {                                                                                                                   
+          ssize_t w = write(dst, buf + written, n - written);                                                                                 
+          if (w < 0) {
+              if (errno == EINTR) continue;
+              fsync(dst);
+              close(src);
+              close(dst);
+              return AOF_ERR;
+          }
+          written += w;                                                                                                                       
+      }                                                                                                                                       
+  }                                                                                                                                           
+  fsync(dst);                                                                                                                                 
+  close(src);                                                                                                                                 
+  close(dst);
+  return AOF_OK;
+}
+
+// --- Failure Recovery: append tmp.aof back into appendonly.aof ---
+enum AOF_RESULT aof_recover_on_compact_fail(AOFManager *aof) {
+    // Flush any commands still buffered in memory so they land in tmp.aof first
+    aof_force_flush(aof);
+
+    // Open appendonly.aof for appending (create if it was lost)
+    int dst = open("appendonly.aof", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (dst == -1) {
+        return AOF_ERR;
+    }
+
+    // Copy tmp.aof (writes that accumulated while the child ran) into appendonly.aof
+    int src = open("tmp.aof", O_RDONLY);
+    if (src != -1) {
+        char buf[65536];
+        ssize_t n;
+        while ((n = read(src, buf, sizeof(buf))) > 0) {
+            ssize_t written = 0;
+            while (written < n) {
+                ssize_t w = write(dst, buf + written, n - written);
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    close(src);
+                    fsync(dst);
+                    close(dst);
+                    return AOF_ERR;
+                }
+                written += w;
+            }
+        }
+        close(src);
+        unlink("tmp.aof");
+    }
+
+    fsync(dst);
+
+    // Redirect future AOF writes back to appendonly.aof
+    int old_fd = aof->fd;
+    aof_redirect(aof, dst);
+    close(old_fd);
+
+    // Re-sync the in-memory file_size counter with what's actually on disk
+    struct stat st;
+    if (fstat(dst, &st) == 0) {
+        aof->file_size = (uint64_t)st.st_size;
+    }
+
+    return AOF_OK;
+}
+
+// --- Redirect AOF ---
+enum AOF_RESULT aof_redirect(AOFManager *aof, int fd){
+    pthread_mutex_lock(&aof->lock);
+    aof->fd = fd;
+    pthread_mutex_unlock(&aof->lock);
     
-    exit(success ? 0 : 1);
+    return AOF_OK;
+}
+
+enum AOF_RESULT aof_check_compact(AOFManager *aof){
+    if(aof->file_size < MIN_AOF_FILE_SIZE || aof->child_pid != -1){
+        return AOF_ERR;
+    }
+    
+    if(aof->file_size > aof->last_compaction_file_size * AOF_COMPACTION_FACTOR){
+        return AOF_OK;
+    }
+
+    return AOF_ERR;
 }
 
 // --- KV Compaction ---
@@ -174,13 +310,8 @@ static enum AOF_RESULT _append_zadd_buf(struct Buffer *buf, const char *key, siz
     buf->data[buf->used++] = '*';
 
     int num_of_args = (2*count) + 2;    // ZADD + key + members + doubles
-    char *end_of_window = buf->data + buf->used + 20; 
-    char *start = itoa((uint64_t)num_of_args, end_of_window);
-    
-    size_t digit_count = (size_t)(end_of_window - start);
-    
-    memmove(buf->data + buf->used, start, digit_count);
-    buf->used += digit_count;
+    char *end = __write_size_t(buf->data + buf->used, (size_t)num_of_args);
+    buf->used = (size_t)(end - buf->data);
 
     buf->data[buf->used++] = '\r';
     buf->data[buf->used++] = '\n';

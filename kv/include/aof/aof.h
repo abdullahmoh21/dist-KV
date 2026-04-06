@@ -9,6 +9,8 @@
 typedef struct RedisStore RedisStore;
 
 #define AOF_READ_BUFF_LEN (64 << 10)
+#define MIN_AOF_FILE_SIZE (64 << 10)
+#define AOF_COMPACTION_FACTOR 2
 #define AOF_READ_BUFF_LEN_MAX (256ULL << 20)
 #define MAX_AOF_BUF_LIMIT AOF_READ_BUFF_LEN_MAX
 
@@ -38,6 +40,9 @@ typedef struct {
     int ready_to_flush;
     int write_in_progress;
     uint64_t last_flush_ms;
+    _Atomic uint64_t last_compaction_file_size;
+    _Atomic uint64_t file_size;
+    pid_t child_pid;
 } AOFManager;
 
 
@@ -45,6 +50,11 @@ enum AOF_RESULT aof_load(RedisStore *store);
 enum AOF_RESULT aof_create(AOFManager **out);
 enum AOF_RESULT aof_add(AOFManager *aof, RedisCommand *command);
 void aof_compact(RedisStore *store);
-enum AOF_RESULT aof_check_flush(AOFManager *aof);
 void aof_destroy(AOFManager *aof);
+enum AOF_RESULT aof_redirect(AOFManager *aof, int fd);
+enum AOF_RESULT aof_check_flush(AOFManager *aof);
+enum AOF_RESULT aof_force_flush(AOFManager *aof);
+enum AOF_RESULT aof_check_compact(AOFManager *aof);
+enum AOF_RESULT aof_merge_compacted(AOFManager *aof);
+enum AOF_RESULT aof_recover_on_compact_fail(AOFManager *aof);
 #endif
