@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include "parser/resp_parser.h"
 #include "store/redis_store.h"
+#include "store/skip_list.h"
 #include "engine/execution_engine.h"
 #include "utils/fast_format.h"
 #include "utils/fast_parse.h"
@@ -23,6 +24,7 @@ ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len);
 ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count);
 static ExecuteResult _sendRaw(int clientfd, const char *buff, size_t len);
 static ExecuteResult _parseDouble(BulkString *str, double *out);
+static ExecuteResult _parseLong(BulkString *str, long *out);
 static ExecuteResult _validate_key_sizes(int clientfd, RedisCommand *command, const struct CommandEntry *entry);
 
 static ReplyWriteFn g_reply_writer = NULL;
@@ -246,10 +248,77 @@ static ExecuteResult exec_zrem(int clientfd, RedisCommand *command, RedisStore *
 }
 
 static ExecuteResult exec_zrange(int clientfd, RedisCommand *command, RedisStore *store){
-    (void) clientfd;
-    (void) command;
-    (void) store;
-    return 0;
+    BulkString *key_str   = &command->args[1];
+    BulkString *start_str = &command->args[2];
+    BulkString *stop_str  = &command->args[3];
+
+    int by_score    = 0;
+    int with_scores = 0;
+    for (int i = 4; i < command->arg_count; i++) {
+        BulkString *flag = &command->args[i];
+        if (strncasecmp(flag->data, "BYSCORE", flag->len) == 0) {
+            by_score = 1;
+        } else if (strncasecmp(flag->data, "WITHSCORES", flag->len) == 0) {
+            with_scores = 1;
+        }
+    }
+
+    Zset *zset = NULL;
+    enum RS_RESULT zset_res = rs_get_zset(store, key_str, &zset);
+    if (zset_res == RS_NOT_FOUND) {
+        return sendArrayHeader(clientfd, 0);
+    } else if (zset_res == RS_WRONG_TYPE) {
+        sendError(clientfd, "WRONGTYPE Operation against a key holding the wrong kind of value");
+        return EE_OK;
+    } else if (zset_res != RS_OK) {
+        sendError(clientfd, "Internal server error");
+        return EE_OK;
+    }
+
+    SkipListIterator it;
+    if (by_score) {
+        double start, stop;
+        if (_parseDouble(start_str, &start) != EE_OK || _parseDouble(stop_str, &stop) != EE_OK) {
+            sendError(clientfd, "ERR value is not a valid float");
+            return EE_OK;
+        }
+        it = sl_iterator_score(zset->sl, start, stop);
+    } else {
+        long start, stop;
+        if (_parseLong(start_str, &start) != EE_OK || _parseLong(stop_str, &stop) != EE_OK) {
+            sendError(clientfd, "ERR value is not an integer or out of range");
+            return EE_OK;
+        }
+        long size = (long) zset->sl->size;
+        if (start < 0) start = size + start;
+        if (stop  < 0) stop  = size + stop;
+        if (start < 0) start = 0;
+        if (stop >= size) stop = size - 1;
+        it = sl_iterator_rank(zset->sl, start, stop);
+    }
+
+    // Pass 1: count result set size (iterator is a stack struct — copy is free)
+    SkipListIterator count_it = it;
+    int count = 0;
+    while (sl_next(&count_it) != NULL) count++;
+
+    ExecuteResult res = sendArrayHeader(clientfd, with_scores ? count * 2 : count);
+    if (res != EE_OK) return res;
+
+    // Pass 2: send members (and optionally scores)
+    ZSetMember *member;
+    while ((member = sl_next(&it)) != NULL) {
+        res = sendBulkString(clientfd, member->key, member->key_len);
+        if (res != EE_OK) return res;
+        if (with_scores) {
+            char score_buf[64];
+            int score_len = snprintf(score_buf, sizeof(score_buf), "%g", member->score);
+            res = sendBulkString(clientfd, score_buf, score_len);
+            if (res != EE_OK) return res;
+        }
+    }
+
+    return EE_OK;
 };
 
 static ExecuteResult exec_ping(int clientfd, RedisCommand *command, RedisStore *store){
@@ -461,6 +530,18 @@ ExecuteResult _parseDouble(BulkString *str, double *out) {
     if (fast_strtod(str->data, str->len, out) != 0) {
         return EE_ERR;
     }
+    return EE_OK;
+}
+
+static ExecuteResult _parseLong(BulkString *str, long *out) {
+    char buf[32];
+    if (str->len >= sizeof(buf)) return EE_ERR;
+    memcpy(buf, str->data, str->len);
+    buf[str->len] = '\0';
+    char *ep;
+    errno = 0;
+    *out = strtol(buf, &ep, 10);
+    if (ep != buf + str->len || errno != 0) return EE_ERR;
     return EE_OK;
 }
 
