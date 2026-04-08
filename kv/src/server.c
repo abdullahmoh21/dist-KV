@@ -204,23 +204,18 @@ int main(void){
             pid_t pid = waitpid(aof->child_pid, &status, WNOHANG);
             if(pid > 0){
                 if(!(WIFEXITED(status) && WEXITSTATUS(status) == 0)){
-                    fprintf(stderr, "[AOF] compaction child %d failed (status=%d), recovering tmp.aof -> appendonly.aof\n", aof->child_pid, status);
-                    if(aof_recover_on_compact_fail(aof) != AOF_OK){
-                        fprintf(stderr, "[AOF] recovery failed — writes in tmp.aof may be lost\n");
-                    } else {
-                        fprintf(stderr, "[AOF] recovery ok, file_size=%llu\n", (unsigned long long)aof->file_size);
-                    }
+                    aof_recover_on_compact_fail(aof);
+                    fprintf(stderr, "[AOF] compaction failed — recovered writes from tmp.aof\n");
                     aof->last_compaction_file_size = aof->file_size;
                     aof->child_pid = -1;
                     hm_resume_resize(store.dict);
                     continue;
                 }
 
-                fprintf(stderr, "[AOF] compaction child done, merging tmp.aof -> compacted.aof\n");
                 aof_force_flush(aof);
 
                 if(aof_merge_compacted(aof) != AOF_OK){
-                    fprintf(stderr, "[AOF] merge failed\n");
+                    fprintf(stderr, "[AOF] compaction failed — merge error\n");
                     aof->child_pid = -1;
                     hm_resume_resize(store.dict);
                     continue;
@@ -240,7 +235,8 @@ int main(void){
                 aof->last_compaction_file_size = st.st_size;
                 aof->child_pid = -1;
                 hm_resume_resize(store.dict);
-                fprintf(stderr, "[AOF] compaction complete, new file_size=%llu bytes\n", (unsigned long long)st.st_size);
+                fprintf(stderr, "[AOF] compaction complete — new file size: %llu bytes\n",
+                        (unsigned long long)aof->file_size);
             }
         } else if(aof_check_compact(aof) == AOF_OK){
             int aof_fd = open("tmp.aof", O_WRONLY | O_CREAT | O_APPEND | O_TRUNC, 0644);
@@ -252,19 +248,20 @@ int main(void){
             aof_redirect(aof, aof_fd);
             close(old_fd);
 
-            fprintf(stderr, "[AOF] triggering compaction: file_size=%llu last_compaction=%llu\n",
+            fprintf(stderr, "[AOF] compaction triggered — AOF at %llu bytes (%.0fx growth factor hit)\n",
                 (unsigned long long)aof->file_size,
-                (unsigned long long)aof->last_compaction_file_size);
+                aof->last_compaction_file_size > 0
+                    ? (double)aof->file_size / (double)aof->last_compaction_file_size
+                    : 0.0);
 
             hm_pause_resize(store.dict);
 
             pid_t pid = fork();
-            
+
             if(pid == 0){
                 aof_compact(&store);
             } else if(pid > 0){
                 aof->child_pid = pid;
-                fprintf(stderr, "[AOF] compaction child spawned pid=%d\n", pid);
             } else {
                 perror("[AOF] fork failed");
                 hm_resume_resize(store.dict);

@@ -37,19 +37,9 @@ static enum AOF_RESULT _buffer_ensure_space(int fd, struct Buffer *buf, size_t n
 
 // --- Compaction Entry Point ---
 void aof_compact(RedisStore *store) {
-    // Log initial AOF size
-    struct stat aof_stat;
-    off_t initial_aof_size = 0;
-    if (stat("appendonly.aof", &aof_stat) == 0) {
-        initial_aof_size = aof_stat.st_size;
-    }
-    fprintf(stderr, "[AOF child] starting compaction — initial AOF size: %lld bytes\n",
-            (long long)initial_aof_size);
-
     int aof_fd = open("compacted.aof", O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
     if (aof_fd == -1) {
-        perror("[AOF child] open compacted.aof");
-        exit(1);
+        _exit(1);
     }
 
     // mmap instead of malloc — malloc is not safe after fork() in a multithreaded
@@ -58,7 +48,6 @@ void aof_compact(RedisStore *store) {
     size_t map_size = sizeof(struct Buffer) + COMPACT_BUF_SIZE;
     void *mem = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (mem == MAP_FAILED) {
-        perror("[AOF child] mmap");
         close(aof_fd);
         _exit(1);
     }
@@ -75,16 +64,6 @@ void aof_compact(RedisStore *store) {
 
     void *current = NULL;
     int success = 1;
-    size_t initial_commands = 0;
-    size_t compacted_commands = 0;
-
-    // Count total commands in the initial AOF (one per store entry as a baseline)
-    HMIterator count_it;
-    hm_it_init(store->dict, &count_it);
-    void *tmp = NULL;
-    while (hm_it_next(&count_it, &tmp) == HM_OK) initial_commands++;
-    fprintf(stderr, "[AOF child] initial AOF: size=%lld bytes, entries=%zu\n",
-            (long long)initial_aof_size, initial_commands);
 
     // walk the store
     while (hm_it_next(&h_it, &current) == HM_OK) {
@@ -93,14 +72,8 @@ void aof_compact(RedisStore *store) {
 
         if (obj->type == T_KV) {
             res = _write_kv_compaction(aof_fd, buf, obj);
-            if (res == AOF_OK) compacted_commands++;
         } else if (obj->type == T_ZSET) {
             res = _write_zset_compaction(aof_fd, buf, obj);
-            if (res == AOF_OK) {
-                struct Zset *zset = (struct Zset *)obj->data;
-                size_t member_count = zset->hm->item_count;
-                compacted_commands += (member_count + ZSET_BATCH_SIZE - 1) / ZSET_BATCH_SIZE;
-            }
         }
 
         if (res != AOF_OK) {
@@ -112,11 +85,6 @@ void aof_compact(RedisStore *store) {
     if (success) {
         _flush_buffer_to_disk(aof_fd, buf);
         fsync(aof_fd);
-        off_t compacted_size = lseek(aof_fd, 0, SEEK_END);
-        fprintf(stderr, "[AOF child] compaction done — compacted AOF: size=%lld bytes, commands=%zu\n",
-                (long long)compacted_size, compacted_commands);
-    } else {
-        fprintf(stderr, "[AOF child] compaction failed\n");
     }
 
     munmap(mem, map_size);
