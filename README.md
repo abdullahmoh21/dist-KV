@@ -23,7 +23,7 @@ Benchmarked with `redis-benchmark -t get,set -n 1,000,000 -c 100 -P 16` (pipelin
 | GET       | **1,290,322 RPS** | 0.583 ms   |
 | SET       | **1,114,827 RPS** | 0.487 ms   |
 
-Throughput was **doubled from ~600K to 1.2M+ RPS** through a series of low-level optimizations. Full writeup: [naqvi.dev/blog/beating_redis](https://naqvi.dev/blog/beating_redis)
+Throughput was **increased from ~25K to 1.2M+ RPS** through a series of low-level optimizations. Full writeup: [naqvi.dev/blog/beating_redis](https://naqvi.dev/blog/beating_redis)
 
 ## Supported Commands
 
