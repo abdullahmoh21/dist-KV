@@ -28,11 +28,19 @@ typedef struct BulkString {
     size_t len;
 } BulkString;
 
+// Commands with arg_count <= INLINE_ARGS_MAX use stack-allocated inline_args storage
+// instead of a heap allocation, eliminating one malloc/free per parsed command.
+// INLINE_ARGS_MAX=8 covers every currently implemented command: the largest are
+// ZADD (score+member pairs) and ZRANGE with flags (up to 6 args in typical usage).
+#define INLINE_ARGS_MAX 8
+
 typedef struct RedisCommand {
-    struct BulkString *args;
+    struct BulkString *args;    // points to inline_args or heap, depending on args_on_heap
     int arg_count;
     char *raw_start;
     size_t raw_len;
+    int args_on_heap;           // 1 if args was malloc'd (arg_count > INLINE_ARGS_MAX)
+    struct BulkString inline_args[INLINE_ARGS_MAX];
 } RedisCommand;
 
 /* Function Prototypes */

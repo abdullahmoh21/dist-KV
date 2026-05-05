@@ -77,35 +77,18 @@ int event_loop_mod(event_loop_t *loop, int fd, int mask) {
         return -1;
     }
 
-    // First delete existing filters, then add new ones
-    struct kevent changes[4];
-    int nchanges = 0;
+    // Use EV_ADD|EV_ENABLE vs EV_ADD|EV_DISABLE for both filters in a single kevent() call.
+    // EV_DISABLE keeps the filter registered but silenced — no events fire while disabled.
+    // This avoids the previous 2-syscall pattern (EV_DELETE then EV_ADD) that was needed
+    // because deleting a non-existent filter would fail and had to be in a separate call.
+    struct kevent changes[2];
+    int read_op  = (mask & EVENT_READABLE) ? (EV_ADD | EV_ENABLE) : (EV_ADD | EV_DISABLE);
+    int write_op = (mask & EVENT_WRITABLE) ? (EV_ADD | EV_ENABLE) : (EV_ADD | EV_DISABLE);
 
-    // Delete existing filters
-    EV_SET(&changes[nchanges], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    nchanges++;
-    EV_SET(&changes[nchanges], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    nchanges++;
+    EV_SET(&changes[0], fd, EVFILT_READ,  read_op,  0, 0, NULL);
+    EV_SET(&changes[1], fd, EVFILT_WRITE, write_op, 0, 0, NULL);
 
-    // Add new filters based on mask
-    if (mask & EVENT_READABLE) {
-        EV_SET(&changes[nchanges], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
-        nchanges++;
-    }
-    if (mask & EVENT_WRITABLE) {
-        EV_SET(&changes[nchanges], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, NULL);
-        nchanges++;
-    }
-
-    // Ignore errors from delete operations (fd might not have those filters)
-    kevent(loop->kqfd, changes, 2, NULL, 0, NULL);
-    
-    // Apply the add operations
-    if (nchanges > 2) {
-        return kevent(loop->kqfd, &changes[2], nchanges - 2, NULL, 0, NULL);
-    }
-    
-    return 0;
+    return kevent(loop->kqfd, changes, 2, NULL, 0, NULL);
 }
 
 int event_loop_del(event_loop_t *loop, int fd, int mask) {

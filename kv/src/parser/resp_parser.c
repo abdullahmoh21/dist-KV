@@ -43,46 +43,56 @@ ssize_t parse_array_command(char *buff, size_t buff_len, struct RedisCommand *ou
         return ERR_INVALID_DELIM;
     }
 
-    // Allocate into a local pointer first
-    struct BulkString *strings = calloc(array_len, sizeof(struct BulkString));
-    if (strings == NULL) return ERR_MEM_ALLOC;
+    // For commands with few arguments, point directly into the caller's inline_args array
+    // (embedded in the RedisCommand struct on the caller's stack) — zero heap allocation.
+    // Fall back to heap only for commands with more than INLINE_ARGS_MAX args (e.g., bulk DEL).
+    int args_on_heap = (array_len > INLINE_ARGS_MAX);
+    struct BulkString *strings;
+    if (args_on_heap) {
+        strings = calloc(array_len, sizeof(struct BulkString));
+        if (strings == NULL) return ERR_MEM_ALLOC;
+    } else {
+        strings = out->inline_args;
+    }
+
+#define FREE_STRINGS_IF_HEAP() do { if (args_on_heap) free(strings); } while(0)
 
     for (int i = 0; i < array_len; i++) {
         if (!advance(buff, buff_len, &tmp_cursor, '$')) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return (tmp_cursor < buff_len) ? ERR_INVALID_BULK_P : PARSE_INCOMPLETE;
         }
 
         size_t b_start = tmp_cursor;
         if (!advance_till_delimeter(buff, buff_len, &tmp_cursor)) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return PARSE_INCOMPLETE;
         }
 
         ssize_t bytes_to_read;
         if (!parse_int(buff, b_start, tmp_cursor - b_start, &bytes_to_read)) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return ERR_INVALID_BULK_L;
         }
 
         if (bytes_to_read > MAX_BULK_LEN) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return ERR_BULK_TOO_BIG;
         }
 
         // Handle the \r\n after the length ($5\r\n...)
         delim_rc = consume_delimiter(buff, &tmp_cursor, buff_len);
         if (delim_rc == 0) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return PARSE_INCOMPLETE;
         }
         if (delim_rc < 0) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return ERR_INVALID_DELIM;
         }
 
-        if (bytes_to_read == -1) { 
-            strings[i].data = NULL; 
+        if (bytes_to_read == -1) {
+            strings[i].data = NULL;
             strings[i].len = 0;
             // No data to read, and we already consumed the delimiter after the '-1'
             continue;
@@ -90,29 +100,32 @@ ssize_t parse_array_command(char *buff, size_t buff_len, struct RedisCommand *ou
 
         // Check if data + trailing \r\n exists
         if (buff_len - tmp_cursor < (size_t)bytes_to_read + 2) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return PARSE_INCOMPLETE;
         }
-       
+
         parse_bulk_string(buff, &tmp_cursor, bytes_to_read, &strings[i]);
 
         // Consume the final \r\n after the bulk data
         delim_rc = consume_delimiter(buff, &tmp_cursor, buff_len);
         if (delim_rc == 0) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return PARSE_INCOMPLETE;
         }
         if (delim_rc < 0) {
-            free(strings);
+            FREE_STRINGS_IF_HEAP();
             return ERR_INVALID_DELIM;
         }
     }
-    
-    out->args = strings;
-    out->arg_count = array_len;
-    out->raw_start = buff;
-    out->raw_len = (ssize_t)tmp_cursor;
-    return (ssize_t)tmp_cursor; 
+
+#undef FREE_STRINGS_IF_HEAP
+
+    out->args        = strings;
+    out->arg_count   = array_len;
+    out->args_on_heap = args_on_heap;
+    out->raw_start   = buff;
+    out->raw_len     = (size_t)tmp_cursor;
+    return (ssize_t)tmp_cursor;
 }
 
 
@@ -176,14 +189,10 @@ static void parse_bulk_string(char *buff, size_t *cursor, size_t bytes_to_read, 
 }
 
 void free_command(struct RedisCommand *cmd) {
-    if (cmd == NULL) {
-        return;
-    }
-
-    if (cmd->args != NULL) {
+    if (cmd == NULL) return;
+    if (cmd->args_on_heap && cmd->args != NULL) {
         free(cmd->args);
         cmd->args = NULL;
     }
-
     cmd->arg_count = 0;
 }
