@@ -99,30 +99,29 @@ enum AOF_RESULT aof_merge_compacted(AOFManager *aof){
     return AOF_ERR;
   }        
 
-  int dst = open("compacted.aof", O_WRONLY | O_APPEND);          
+  // O_DSYNC: each write() syncs data to disk, making the final fsync() redundant.
+  int dst = open("compacted.aof", O_WRONLY | O_APPEND | O_DSYNC);
   if(dst == -1){
     close(src);
     return AOF_ERR;
-  }                                                                            
-                                                                                                                                              
-  char buf[65536];                                                                                                                            
-  ssize_t n;                                                                                                                                  
-  while ((n = read(src, buf, sizeof(buf))) > 0) {                                                                                             
-      ssize_t written = 0;                                                                                                                    
-      while (written < n) {                                                                                                                   
-          ssize_t w = write(dst, buf + written, n - written);                                                                                 
+  }
+
+  char buf[65536];
+  ssize_t n;
+  while ((n = read(src, buf, sizeof(buf))) > 0) {
+      ssize_t written = 0;
+      while (written < n) {
+          ssize_t w = write(dst, buf + written, n - written);
           if (w < 0) {
               if (errno == EINTR) continue;
-              fsync(dst);
               close(src);
               close(dst);
               return AOF_ERR;
           }
-          written += w;                                                                                                                       
-      }                                                                                                                                       
-  }                                                                                                                                           
-  fsync(dst);                                                                                                                                 
-  close(src);                                                                                                                                 
+          written += w;
+      }
+  }
+  close(src);
   close(dst);
   return AOF_OK;
 }
