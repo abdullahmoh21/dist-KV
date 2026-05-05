@@ -5,6 +5,9 @@
 #include <parser/resp_parser.h>
 #include <stddef.h>
 
+#ifndef AOF_BUF_H
+typedef struct AOFManager AOFManager;
+#endif
 
 enum RS_RESULT {
     RS_OK,
@@ -20,9 +23,11 @@ enum RS_RESULT {
 
 typedef struct RedisStore {
     HashMap *dict;
+    AOFManager *aof;
 } RedisStore;
 
 enum RS_RESULT create_store(RedisStore *store);
+enum RS_RESULT rs_flush(RedisStore *store);
 enum RS_RESULT rs_get(RedisStore *store, BulkString *key_str, RedisObject **out);
 enum RS_RESULT rs_set(RedisStore *store, BulkString *key_str, BulkString *data_str);
 enum RS_RESULT rs_delete(RedisStore *store, BulkString *key_str);
