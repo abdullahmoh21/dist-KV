@@ -13,6 +13,10 @@ typedef struct RedisStore RedisStore;
 #define AOF_COMPACTION_FACTOR 2
 #define AOF_READ_BUFF_LEN_MAX (256ULL << 20)
 #define MAX_AOF_BUF_LIMIT AOF_READ_BUFF_LEN_MAX
+// Per-buffer initial allocation. Two buffers (active + standby) = 2MB total.
+// Sized to hold ~14ms of writes at 70MB/s, keeping swap frequency low enough
+// that the _force_swap_buffers stall is rarely hit during peak load.
+#define INITIAL_AOF_BUFF_CAPACITY (1024ULL * 1024)
 
 #define SET_HEADER "*3\r\n$3\r\nSET\r\n"
 #define SET_HEADER_LEN (sizeof(SET_HEADER) - 1)
@@ -29,11 +33,11 @@ enum AOF_RESULT {
     AOF_OOM
 };
 
-typedef struct {
+typedef struct AOFManager {
     struct Buffer *active;
     struct Buffer *standby;
-    pthread_mutex_t lock;      
-    pthread_cond_t cond;       
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
     pthread_t thread_id;
     int fd;
     int shutdown;
@@ -57,4 +61,5 @@ enum AOF_RESULT aof_force_flush(AOFManager *aof);
 enum AOF_RESULT aof_check_compact(AOFManager *aof);
 enum AOF_RESULT aof_merge_compacted(AOFManager *aof);
 enum AOF_RESULT aof_recover_on_compact_fail(AOFManager *aof);
+enum AOF_RESULT aof_truncate(AOFManager *aof);
 #endif
