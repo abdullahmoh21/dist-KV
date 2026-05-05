@@ -2,7 +2,7 @@
 
 A Redis-compatible key-value store built from scratch in C11 — no external dependencies, no libuv, no hiredis. Raw POSIX sockets, a hand-rolled RESP parser, and a custom async event loop.
 
-Sustains **1.29M GET / 1.11M SET requests per second** on localhost with AOF persistence enabled.
+Sustains **2.1M GET / 1.8M SET requests per second** on localhost with AOF persistence enabled.
 
 ---
 
