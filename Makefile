@@ -35,6 +35,10 @@ CLIENT_BIN = client_build
 # Server source files
 SERVER_SRCS = $(SERVER_SRC_DIR)/server.c \
               $(SERVER_SRC_DIR)/engine/execution_engine.c \
+              $(SERVER_SRC_DIR)/engine/reply.c \
+              $(SERVER_SRC_DIR)/engine/handler/exec_kv.c \
+              $(SERVER_SRC_DIR)/engine/handler/exec_zset.c \
+              $(SERVER_SRC_DIR)/engine/handler/exec_misc.c \
               $(SERVER_SRC_DIR)/parser/resp_parser.c \
               $(SERVER_SRC_DIR)/store/buffer.c \
               $(SERVER_SRC_DIR)/store/hashmap.c \
@@ -121,8 +125,11 @@ debug: CFLAGS = -Wall -Wextra -std=c11 -g -O0 -DDEBUG
 debug: clean all
 
 # Release build (optimized, no debug symbols)
+# -march=native: enables AVX2/SSE4 for memcpy, memcmp, and the FNV hash loop
+# -flto: link-time optimization — inlines hm_get, append_client_output, _sendRaw
+#        across translation unit boundaries, where they're called millions of times/sec
 .PHONY: release
-release: CFLAGS = -Wall -Wextra -std=c11 -O3 -DNDEBUG
+release: CFLAGS = -Wall -Wextra -std=c11 -O3 -DNDEBUG -march=native -flto
 release: clean all
 
 # Profile build (optimized with frame pointers for profilers)
