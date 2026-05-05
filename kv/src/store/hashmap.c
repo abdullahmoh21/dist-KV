@@ -6,11 +6,29 @@
 #include <time.h>
 
 // Helper prototypes
-static size_t _hash_key(char *key, size_t key_len, size_t idx_space_len);
 static HM_RESULT _update_buffer_size(HashMap *hm);
 static HM_RESULT _rehash(HashMap *hm, size_t new_size);
 static int _is_power_of_two(size_t n);
 static size_t _next_power_of_two(size_t n);
+
+// Recompute the integer resize thresholds after any change to hm->size.
+// Avoids floating-point division on every insert/delete.
+static void _update_thresholds(HashMap *hm) {
+    hm->expand_threshold = (size_t)(hm->size * EXPAND_THRESH);
+    hm->shrink_threshold = (size_t)(hm->size * SHRINK_THRESH);
+}
+
+// Raw FNV-1a hash — no modulo applied.  Stable across resizes; the bucket
+// index is always derived as  hash & (hm->size - 1)  at call time so a
+// cached raw hash remains valid after a rehash.
+size_t hm_compute_hash(const char *key, size_t key_len) {
+    size_t hash = FNV_OFFSET;
+    for (size_t i = 0; i < key_len; i++) {
+        hash ^= (unsigned char)(*key++);
+        hash *= FNV_PRIME;
+    }
+    return hash;
+}
 
 HashMap* hm_create(KeyView (*get_key_fn)(void *)){
     size_t initial_size = _next_power_of_two(DEFAULT_SIZE);
@@ -24,87 +42,84 @@ HashMap* hm_create(KeyView (*get_key_fn)(void *)){
     hm->buckets = buckets;
     hm->size = initial_size;
     hm->item_count = 0;
-    hm->get_key = get_key_fn; // Store the translator function
+    hm->resize_paused = 0;
+    hm->get_key = get_key_fn;
+    _update_thresholds(hm);
     return hm;
 }
 
-HM_RESULT hm_insert(HashMap *hm, void *val) {    
+// ── _h variants: caller supplies the raw FNV hash, we apply the modulo. ──────
+
+HM_RESULT hm_get_h(HashMap *hm, const char *key, size_t key_len, size_t hash, void **out) {
+    size_t idx = hash & (hm->size - 1);
+    HashNode *current = hm->buckets[idx];
+    while (current != NULL) {
+        KeyView kv = hm->get_key(current->val);
+        if (kv.len == key_len && memcmp(kv.data, key, key_len) == 0) {
+            *out = current->val;
+            return HM_OK;
+        }
+        current = current->next;
+    }
+    return HM_NOT_FOUND;
+}
+
+HM_RESULT hm_insert_h(HashMap *hm, void *val, size_t hash) {
     KeyView key_to_add = hm->get_key(val);
-    char *key = key_to_add.data;
-    size_t key_len = key_to_add.len;
-    size_t idx = _hash_key(key, key_len, hm->size);
+    size_t idx = hash & (hm->size - 1);
 
     HashNode *current = hm->buckets[idx];
     HashNode *prev = NULL;
-    while(current != NULL){
+    while (current != NULL) {
         KeyView dup_key = hm->get_key(current->val);
-        if(dup_key.len == key_len && memcmp(dup_key.data, key, key_len) == 0){
+        if (dup_key.len == key_to_add.len &&
+            memcmp(dup_key.data, key_to_add.data, key_to_add.len) == 0) {
             return HM_DUPLICATE;
         }
         prev = current;
         current = current->next;
     }
 
-    HashNode *node_to_add = calloc(1, sizeof(HashNode));
-    if(node_to_add == NULL){ return HM_OOM; }
+    // malloc instead of calloc: both fields (val, next) are written immediately
+    // below, so zero-initialising the 16-byte struct is wasted work on every insert.
+    HashNode *node = malloc(sizeof(HashNode));
+    if (!node) return HM_OOM;
+    node->val  = val;
+    node->next = NULL;
 
-    node_to_add->val = val;
-
-    if(prev == NULL){   // bucket was empty
-        hm->buckets[idx] = node_to_add;
-    } else {
-        prev->next = node_to_add;
-    }
+    if (prev == NULL) hm->buckets[idx] = node;
+    else              prev->next = node;
 
     hm->item_count++;
-
     _update_buffer_size(hm);
     return HM_OK;
 }
 
-HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out){
-    size_t idx = _hash_key(key, key_len, hm->size);
-    if(hm->buckets[idx] == NULL){
-        return HM_NOT_FOUND;
-    } else{
-        HashNode *current = hm->buckets[idx];
-        while(current != NULL){
-            KeyView kv = hm->get_key(current->val);
-            if(kv.len == key_len && memcmp(kv.data, key, kv.len) == 0){
-                *out = current->val; 
-                return HM_OK;
-            }
-            current = current->next;
-        }
-        return HM_NOT_FOUND;
-    }
-}
+HM_RESULT hm_delete_h(HashMap *hm, const char *key, size_t key_len, size_t hash, void **out) {
+    // _update_buffer_size may rehash and change hm->size; reapply the modulo
+    // after the call so the bucket index reflects the current table layout.
+    if (_update_buffer_size(hm) != HM_OK) return HM_ERR;
+    size_t idx = hash & (hm->size - 1);
+    if (hm->buckets[idx] == NULL) return HM_NOT_FOUND;
 
-HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out){
-    if(_update_buffer_size(hm) != HM_OK){   
-        return HM_ERR; 
-    }
-    size_t idx = _hash_key(key, key_len, hm->size);
-    if(hm->buckets[idx] == NULL) { return HM_NOT_FOUND; }
-    
     // node at start
-    HashNode *current = hm->buckets[idx]->next;
-    HashNode *prev = hm->buckets[idx];
-    KeyView kv_p = hm->get_key(prev->val); 
-    if(kv_p.len == key_len && memcmp(kv_p.data, key, kv_p.len) == 0){
+    HashNode *prev    = hm->buckets[idx];
+    HashNode *current = prev->next;
+    KeyView kv_p = hm->get_key(prev->val);
+    if (kv_p.len == key_len && memcmp(kv_p.data, key, key_len) == 0) {
         hm->buckets[idx] = prev->next;
-        *out = prev->val; 
-        free(prev); 
+        *out = prev->val;
+        free(prev);
         hm->item_count--;
         return HM_OK;
     }
-    
+
     // node in middle/end
-    while(current != NULL){
+    while (current != NULL) {
         KeyView kv_c = hm->get_key(current->val);
-        if(kv_c.len == key_len && memcmp(kv_c.data, key, kv_c.len) == 0){
+        if (kv_c.len == key_len && memcmp(kv_c.data, key, key_len) == 0) {
             prev->next = current->next;
-            *out = current->val; 
+            *out = current->val;
             free(current);
             hm->item_count--;
             return HM_OK;
@@ -114,6 +129,59 @@ HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out){
     }
     return HM_NOT_FOUND;
 }
+
+HM_RESULT hm_find_or_insert_h(HashMap *hm, void *new_val, size_t hash, void **existing_out) {
+    KeyView new_kv = hm->get_key(new_val);
+    size_t idx = hash & (hm->size - 1);
+
+    HashNode *current = hm->buckets[idx];
+    HashNode *prev    = NULL;
+
+    while (current != NULL) {
+        KeyView kv = hm->get_key(current->val);
+        if (kv.len == new_kv.len && memcmp(kv.data, new_kv.data, new_kv.len) == 0) {
+            *existing_out = current->val;
+            return HM_OK;
+        }
+        prev    = current;
+        current = current->next;
+    }
+
+    HashNode *node = malloc(sizeof(HashNode));
+    if (!node) return HM_OOM;
+    node->val  = new_val;
+    node->next = NULL;
+
+    if (prev == NULL) hm->buckets[idx] = node;
+    else              prev->next = node;
+
+    hm->item_count++;
+    *existing_out = NULL;
+    _update_buffer_size(hm);
+    return HM_OK;
+}
+
+// ── Public wrappers: compute hash then delegate to the _h variant. ────────────
+
+HM_RESULT hm_insert(HashMap *hm, void *val) {
+    KeyView kv = hm->get_key(val);
+    return hm_insert_h(hm, val, hm_compute_hash(kv.data, kv.len));
+}
+
+HM_RESULT hm_get(HashMap *hm, char *key, size_t key_len, void **out) {
+    return hm_get_h(hm, key, key_len, hm_compute_hash(key, key_len), out);
+}
+
+HM_RESULT hm_delete(HashMap *hm, char *key, size_t key_len, void **out) {
+    return hm_delete_h(hm, key, key_len, hm_compute_hash(key, key_len), out);
+}
+
+HM_RESULT hm_find_or_insert(HashMap *hm, void *new_val, void **existing_out) {
+    KeyView kv = hm->get_key(new_val);
+    return hm_find_or_insert_h(hm, new_val, hm_compute_hash(kv.data, kv.len), existing_out);
+}
+
+// ── Iterator ──────────────────────────────────────────────────────────────────
 
 HM_RESULT hm_it_init(HashMap *hm, HMIterator *out_it){
     if(hm == NULL || out_it == NULL){
@@ -172,8 +240,8 @@ HM_RESULT hm_free_shallow(HashMap *hm){
         HashNode *next = NULL;
         while(current != NULL){
             next = current->next;
-            // simply free our HashNode; leave val for owner 
-            free(current);  
+            // simply free our HashNode; leave val for owner
+            free(current);
             current = next;
         }
     }
@@ -182,19 +250,7 @@ HM_RESULT hm_free_shallow(HashMap *hm){
     return HM_OK;
 }
 
-size_t _hash_key(char *key, size_t key_len, size_t idx_space_len) {
-    if(idx_space_len == 0) {
-        return 0;
-    }
-
-    size_t hash = FNV_OFFSET; 
-    for(size_t i = 0; i<key_len; i++) {
-        hash ^= (unsigned char)(*key++);
-        hash *= FNV_PRIME;
-    }
-
-    return hash & (idx_space_len - 1);
-}
+// ── Internal resize logic ─────────────────────────────────────────────────────
 
 HM_RESULT _update_buffer_size(HashMap *hm){
     if (hm->size == 0) return HM_ERR;
@@ -210,14 +266,13 @@ HM_RESULT _update_buffer_size(HashMap *hm){
         return _rehash(hm, normalized_size);
     }
 
-    double load_factor = (double) hm->item_count / hm->size;
-    if(load_factor > EXPAND_THRESH) {
-        return _rehash(hm, hm->size << 1); 
-    } else if(load_factor < SHRINK_THRESH){
+    // Integer comparisons against precomputed thresholds — no float division per call.
+    if(hm->item_count > hm->expand_threshold) {
+        return _rehash(hm, hm->size << 1);
+    } else if(hm->item_count < hm->shrink_threshold){
         if (hm->size <= min_size) {
             return HM_OK;
         }
-
         size_t target_size = hm->size >> 1;
         if(target_size < min_size) {
             target_size = min_size;
@@ -243,12 +298,13 @@ HM_RESULT _rehash(HashMap *hm, size_t new_size){
 
     HashNode **old_buckets = hm->buckets;
     size_t old_size = hm->size;
-    
+
     HashNode **new_buckets = calloc(new_size, sizeof(HashNode*));
     if(new_buckets == NULL){ return HM_ERR; }
-    
+
     hm->buckets = new_buckets;
     hm->size = new_size;
+    _update_thresholds(hm);
 
     for(size_t i = 0; i < old_size; i++){
         if(old_buckets[i] == NULL){
@@ -259,9 +315,10 @@ HM_RESULT _rehash(HashMap *hm, size_t new_size){
         HashNode *next;
         while(current != NULL){
             next = current->next;
-            // Dynamically grab the key during _rehash
             KeyView kv = hm->get_key(current->val);
-            size_t new_idx = _hash_key(kv.data, kv.len, hm->size);
+            // Recompute the bucket index using the new table size.
+            // hm_compute_hash is used here to separate FNV from the modulo step.
+            size_t new_idx = hm_compute_hash(kv.data, kv.len) & (new_size - 1);
 
             current->next = new_buckets[new_idx];
             new_buckets[new_idx] = current;
