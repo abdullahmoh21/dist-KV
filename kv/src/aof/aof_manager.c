@@ -25,7 +25,7 @@ static void _buffer_append(struct Buffer *buf, RedisCommand *cmd);
 static void* aof_thread(void *arg);
 
 enum AOF_RESULT aof_create(AOFManager **out){
-    int aof_fd = open("appendonly.aof", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int aof_fd = open("appendonly.aof", O_WRONLY | O_CREAT | O_APPEND | O_DSYNC, 0644);
     if (aof_fd == -1) {
         // perror("open");
     }
@@ -39,8 +39,8 @@ enum AOF_RESULT aof_create(AOFManager **out){
         return AOF_OOM;
     }
 
-    active->data = calloc(1, INITIAL_BUFF_CAPACITY);
-    active->capacity = INITIAL_BUFF_CAPACITY;
+    active->data = calloc(1, INITIAL_AOF_BUFF_CAPACITY);
+    active->capacity = INITIAL_AOF_BUFF_CAPACITY;
     active->max_capacity = MAX_AOF_BUF_LIMIT;
     active->read_idx = 0;
     active->used = 0;
@@ -62,8 +62,8 @@ enum AOF_RESULT aof_create(AOFManager **out){
         return AOF_OOM;
     }
 
-    standby->data = calloc(1, INITIAL_BUFF_CAPACITY);
-    standby->capacity = INITIAL_BUFF_CAPACITY;
+    standby->data = calloc(1, INITIAL_AOF_BUFF_CAPACITY);
+    standby->capacity = INITIAL_AOF_BUFF_CAPACITY;
     standby->max_capacity = MAX_AOF_BUF_LIMIT;
     standby->read_idx = 0;
     standby->used = 0;
@@ -178,7 +178,7 @@ void* aof_thread(void *arg) {
             aof->standby->read_idx += n;
             atomic_fetch_add_explicit(&aof->file_size, (uint64_t)n, memory_order_relaxed);
         }
-        fdatasync(aof->fd);
+        // fdatasync omitted: fd is opened with O_DSYNC so each write() already syncs data
         pthread_mutex_lock(&aof->lock);
         aof->standby->read_idx = 0;
         aof->standby->used = 0;
@@ -195,7 +195,10 @@ enum AOF_RESULT aof_check_flush(AOFManager *aof){
     if(aof->active->used == 0) return AOF_OK;
     if(monotonic_ms() - aof->last_flush_ms < 1000) return AOF_OK;
 
-    _force_swap_buffers(aof);
+    // Non-blocking: if the standby is busy skip this tick; data will be picked up
+    // on the next opportunity (either the next 1s timer or when the active fills).
+    // Using _force_swap_buffers here would block the event loop on fdatasync.
+    _try_swap_buffers(aof);
 
     return AOF_OK;
 }
@@ -205,6 +208,31 @@ enum AOF_RESULT aof_force_flush(AOFManager *aof){
     if(aof->active->used == 0) return AOF_OK;
 
     _force_swap_buffers(aof);
+
+    return AOF_OK;
+}
+
+enum AOF_RESULT aof_truncate(AOFManager *aof) {
+    if (aof == NULL) return AOF_ERR;
+
+    // Drain both buffers to disk before wiping the file.
+    aof_force_flush(aof);
+
+    // Wait for the background thread to finish the write it may be mid-way through.
+    pthread_mutex_lock(&aof->lock);
+    while (aof->write_in_progress) {
+        pthread_cond_wait(&aof->cond, &aof->lock);
+    }
+    aof->active->used = 0;
+    aof->active->read_idx = 0;
+    aof->standby->used = 0;
+    aof->standby->read_idx = 0;
+    pthread_mutex_unlock(&aof->lock);
+
+    if (ftruncate(aof->fd, 0) == -1) return AOF_IO_ERR;
+
+    atomic_store_explicit(&aof->file_size, 0, memory_order_relaxed);
+    atomic_store_explicit(&aof->last_compaction_file_size, 0, memory_order_relaxed);
 
     return AOF_OK;
 }

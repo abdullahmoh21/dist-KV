@@ -1,9 +1,10 @@
 #ifndef EXECUTE_ENGINE_H
 #define EXECUTE_ENGINE_H
 
-#include <stddef.h>    
+#include <stddef.h>
+#include <stdint.h>
 #include <store/object.h>
-#include <sys/types.h>  
+#include <sys/types.h>
 
 // Forward declarations
 typedef struct RedisCommand RedisCommand;
@@ -49,12 +50,5 @@ struct CommandEntry {
 };
 
 ExecuteResult dispatch_command(int clientfd, RedisCommand *command, RedisStore *store);
-ExecuteResult sendOK(int clientfd);
-ExecuteResult sendError(int clientfd, char *message);
-ExecuteResult sendNotFound(int clientfd);
-ExecuteResult sendInt(int clientfd, int integerToSend);
-ExecuteResult sendArrayHeader(int clientfd, int count);
-ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len);
-ExecuteResult sendBulkArray(int clientfd, const RedisObject **items, int count);
 void ee_set_reply_writer(ReplyWriteFn writer, void *ctx);
 #endif

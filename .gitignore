@@ -5,8 +5,8 @@
 *.md
 !README.md
 build/
-benchmarks/
 notes/
+.claude/
 appendonly.aof
 compacted.tmp
 
