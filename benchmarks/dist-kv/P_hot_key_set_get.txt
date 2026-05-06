@@ -1,0 +1,93 @@
+# Command: redis-benchmark -p 6379 -n 100000 -c 50 -P 16 -t set,get
+# Server:  dist-KV (release build)
+WARNING: Could not fetch server CONFIG
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        ====== SET ======
+  100000 requests completed in 0.06 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.111 milliseconds (cumulative count 32)
+50.000% <= 0.191 milliseconds (cumulative count 52416)
+75.000% <= 0.503 milliseconds (cumulative count 75152)
+87.500% <= 0.887 milliseconds (cumulative count 87760)
+93.750% <= 1.199 milliseconds (cumulative count 94032)
+96.875% <= 1.367 milliseconds (cumulative count 96912)
+98.438% <= 1.519 milliseconds (cumulative count 98576)
+99.219% <= 1.559 milliseconds (cumulative count 99248)
+99.609% <= 1.839 milliseconds (cumulative count 99632)
+99.805% <= 1.887 milliseconds (cumulative count 99824)
+99.902% <= 1.927 milliseconds (cumulative count 99904)
+99.951% <= 1.943 milliseconds (cumulative count 99968)
+99.976% <= 1.951 milliseconds (cumulative count 100000)
+100.000% <= 1.951 milliseconds (cumulative count 100000)
+
+Cumulative distribution of latencies:
+0.000% <= 0.103 milliseconds (cumulative count 0)
+59.680% <= 0.207 milliseconds (cumulative count 59680)
+69.424% <= 0.303 milliseconds (cumulative count 69424)
+72.240% <= 0.407 milliseconds (cumulative count 72240)
+75.152% <= 0.503 milliseconds (cumulative count 75152)
+82.464% <= 0.607 milliseconds (cumulative count 82464)
+83.712% <= 0.703 milliseconds (cumulative count 83712)
+85.712% <= 0.807 milliseconds (cumulative count 85712)
+88.896% <= 0.903 milliseconds (cumulative count 88896)
+90.896% <= 1.007 milliseconds (cumulative count 90896)
+92.160% <= 1.103 milliseconds (cumulative count 92160)
+94.592% <= 1.207 milliseconds (cumulative count 94592)
+96.272% <= 1.303 milliseconds (cumulative count 96272)
+97.600% <= 1.407 milliseconds (cumulative count 97600)
+98.256% <= 1.503 milliseconds (cumulative count 98256)
+99.280% <= 1.607 milliseconds (cumulative count 99280)
+99.376% <= 1.703 milliseconds (cumulative count 99376)
+99.552% <= 1.807 milliseconds (cumulative count 99552)
+99.856% <= 1.903 milliseconds (cumulative count 99856)
+100.000% <= 2.007 milliseconds (cumulative count 100000)
+
+Summary:
+  throughput summary: 1612903.25 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.379     0.104     0.191     1.223     1.535     1.951
+ ====== GET ======
+  100000 requests completed in 0.05 seconds
+  50 parallel clients
+  3 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+Latency by percentile distribution:
+0.000% <= 0.127 milliseconds (cumulative count 32)
+50.000% <= 0.183 milliseconds (cumulative count 56528)
+75.000% <= 0.207 milliseconds (cumulative count 81488)
+87.500% <= 0.231 milliseconds (cumulative count 89232)
+93.750% <= 0.263 milliseconds (cumulative count 93936)
+96.875% <= 0.327 milliseconds (cumulative count 97040)
+98.438% <= 0.431 milliseconds (cumulative count 98448)
+99.219% <= 0.551 milliseconds (cumulative count 99264)
+99.609% <= 0.647 milliseconds (cumulative count 99632)
+99.805% <= 0.687 milliseconds (cumulative count 99840)
+99.902% <= 0.695 milliseconds (cumulative count 99920)
+99.951% <= 0.711 milliseconds (cumulative count 99968)
+99.976% <= 0.719 milliseconds (cumulative count 99984)
+99.988% <= 0.767 milliseconds (cumulative count 100000)
+100.000% <= 0.767 milliseconds (cumulative count 100000)
+
+Cumulative distribution of latencies:
+0.000% <= 0.103 milliseconds (cumulative count 0)
+81.488% <= 0.207 milliseconds (cumulative count 81488)
+96.224% <= 0.303 milliseconds (cumulative count 96224)
+98.272% <= 0.407 milliseconds (cumulative count 98272)
+98.752% <= 0.503 milliseconds (cumulative count 98752)
+99.424% <= 0.607 milliseconds (cumulative count 99424)
+99.920% <= 0.703 milliseconds (cumulative count 99920)
+100.000% <= 0.807 milliseconds (cumulative count 100000)
+
+Summary:
+  throughput summary: 2222222.25 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        0.192     0.120     0.183     0.279     0.535     0.767
+
