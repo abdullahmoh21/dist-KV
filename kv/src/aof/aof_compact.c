@@ -36,8 +36,8 @@ static enum AOF_RESULT _buffer_ensure_space(int fd, struct Buffer *buf, size_t n
 }
 
 // --- Compaction Entry Point ---
-void aof_compact(RedisStore *store) {
-    int aof_fd = open("compacted.aof", O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
+void aof_compact_to_file(RedisStore *store, const char *filename) {
+    int aof_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
     if (aof_fd == -1) {
         _exit(1);
     }
@@ -91,6 +91,10 @@ void aof_compact(RedisStore *store) {
     close(aof_fd);
 
     _exit(success ? 0 : 1);
+}
+
+void aof_compact(RedisStore *store) {
+    aof_compact_to_file(store, "compacted.aof");
 }
 
 enum AOF_RESULT aof_merge_compacted(AOFManager *aof){                                                                                                    

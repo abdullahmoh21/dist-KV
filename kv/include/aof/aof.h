@@ -54,6 +54,7 @@ enum AOF_RESULT aof_load(RedisStore *store);
 enum AOF_RESULT aof_create(AOFManager **out);
 enum AOF_RESULT aof_add(AOFManager *aof, RedisCommand *command);
 void aof_compact(RedisStore *store);
+void aof_compact_to_file(RedisStore *store, const char *filename);
 void aof_destroy(AOFManager *aof);
 enum AOF_RESULT aof_redirect(AOFManager *aof, int fd);
 enum AOF_RESULT aof_check_flush(AOFManager *aof);

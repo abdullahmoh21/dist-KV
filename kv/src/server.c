@@ -10,6 +10,7 @@
 #include "replication/replication.h"
 #include "utils/time.h"
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -23,7 +24,7 @@
 #include <netinet/tcp.h>
 #include <sys/stat.h>
 
-#define PORT "6379"
+#define DEFAULT_PORT "6379"
 #define BACKLOG 511                        // matches Redis default; avoids SYN drops under burst load
 #define EXPANSION_THRESH 10
 #define MAX_EVENTS 128
@@ -33,15 +34,27 @@
 // Replaces the HashMap used previously for hot-path client lookups.
 // Size must exceed the process's open-file limit; 4096 is safe for typical deployments.
 #define MAX_CLIENT_FDS 4096
+#define MAX_PENDING_WAITS 256
 
 // Client connection state
 typedef struct {
     int fd;
-    int event_mask;         
+    int event_mask;
     struct Buffer *buffer;
     struct Buffer *out_buffer;
     int output_overflow;
 } ClientState;
+
+// A WAIT command that couldn't be satisfied immediately.  The server parks
+// it here and resolves it each event loop tick once enough replicas have ACK'd
+// or the deadline passes.
+typedef struct {
+    int      clientfd;
+    uint64_t target_offset;   // primary offset at time WAIT was issued
+    uint64_t deadline_ms;     // absolute monotonic time when we give up waiting
+    int      numreplicas;     // how many replicas the client wants synced
+    int      active;          // 1 = slot in use
+} PendingWait;
 
 // Server-wide state — single instance, file-static
 typedef struct {
@@ -52,6 +65,11 @@ typedef struct {
     AOFManager *aof;
     ClientState *current_client;
     Replica **replicas;
+    int replica_count;
+    uint64_t repl_offset;       // bytes of write commands propagated to replicas so far
+    ReplClientContext *repl_client;  // non-NULL when running in --replicaof mode
+    int active_forks;           // running fork children (AOF compact + PSYNC snapshots)
+    PendingWait pending_waits[MAX_PENDING_WAITS];
 } Server;
 
 static Server server;
@@ -67,8 +85,29 @@ static ExecuteResult server_reply_write(int clientfd, const char *data, size_t l
 static int append_client_output(ClientState *client, const char *data, size_t len);
 static ExecuteResult flush_client_output(ClientState *client);
 static int update_client_event_mask(ClientState *client, event_loop_t *loop);
+static void handle_psync_full_sync(int clientfd, event_loop_t *loop);
+static void launch_replica_sync(Replica *r, event_loop_t *loop);
+static int connect_to_primary(const char *host, const char *port, uint16_t our_port);
+static int any_fork_running(void);
+static void register_pending_wait(int clientfd, uint64_t target, int numreplicas, long timeout_ms);
+static uint64_t next_pending_wait_deadline_ms(void);
+static void check_pending_waits(void);
+static void cancel_pending_waits(int clientfd);
 
-int main(void){
+int main(int argc, char *argv[]){
+    const char *server_port   = DEFAULT_PORT;
+    const char *replicaof_host = NULL;
+    const char *replicaof_port = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--port") == 0 && i+1 < argc) {
+            server_port = argv[++i];
+        } else if (strcmp(argv[i], "--replicaof") == 0 && i+2 < argc) {
+            replicaof_host = argv[++i];
+            replicaof_port = argv[++i];
+        }
+    }
+
     struct addrinfo hints, *servinfo, *p;
     int yes = 1;
     int rv;
@@ -86,6 +125,8 @@ int main(void){
     }
 
     ee_set_reply_writer(server_reply_write, NULL);
+    repl_set_context(&server.replicas, &server.replica_count, &server.repl_offset);
+    repl_backlog_init(REPL_BACKLOG_DEFAULT_CAP);
 
     if(aof_create(&server.aof) != AOF_OK){
         fprintf(stderr, "Failed to create AOF buffer\n");
@@ -99,7 +140,7 @@ int main(void){
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    if((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0){
+    if((rv = getaddrinfo(NULL, server_port, &hints, &servinfo)) != 0){
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
         return 1;
     }
@@ -153,14 +194,28 @@ int main(void){
         return 1;
     }
 
-    printf("server: waiting for connections on port %s\n", PORT);
+    printf("server: waiting for connections on port %s\n", server_port);
+
+    if (replicaof_host) {
+        uint16_t our_port = (uint16_t)atoi(server_port);
+        if (connect_to_primary(replicaof_host, replicaof_port, our_port) != 0) {
+            fprintf(stderr, "Failed to connect to primary %s:%s\n",
+                    replicaof_host, replicaof_port);
+            return 1;
+        }
+    }
 
     // Main event loop
     fired_event_t events[MAX_EVENTS];
     uint64_t next_flush_ms = monotonic_ms() + 1000;
     while(1) {
         uint64_t now_ms = monotonic_ms();
-        int timeout_ms = (next_flush_ms > now_ms) ? ((int)(next_flush_ms - now_ms)) : 0;
+        // Wake up by the AOF flush timer or the nearest pending WAIT deadline,
+        // whichever comes first, so check_pending_waits fires on time.
+        uint64_t next_wakeup_ms = next_flush_ms;
+        uint64_t pw_deadline = next_pending_wait_deadline_ms();
+        if (pw_deadline < next_wakeup_ms) next_wakeup_ms = pw_deadline;
+        int timeout_ms = (next_wakeup_ms > now_ms) ? ((int)(next_wakeup_ms - now_ms)) : 0;
         int n = event_loop_wait(server.loop, timeout_ms, events, MAX_EVENTS);
 
         if(n < 0){
@@ -174,6 +229,22 @@ int main(void){
 
             if(fd == server.fd){
                 handle_new_connection(server.fd, server.loop, &server.store);
+            } else if(server.repl_client && fd == server.repl_client->fd){
+                int rc = 0;
+                if(mask & EVENT_WRITABLE){
+                    rc = replica_client_handle_writable(server.repl_client, server.loop);
+                }
+                if(rc == 0 && (mask & EVENT_READABLE)){
+                    rc = replica_client_handle_readable(server.repl_client, &server.store, server.loop);
+                }
+                if(rc < 0){
+                    // Primary disconnected — tear down the replica client context
+                    event_loop_del(server.loop, server.repl_client->fd,
+                                   EVENT_READABLE | EVENT_WRITABLE);
+                    close(server.repl_client->fd);
+                    replica_client_destroy(server.repl_client);
+                    server.repl_client = NULL;
+                }
             } else {
                 if(mask & EVENT_READABLE){
                     handle_client_read(fd, server.loop, &server.store, server.aof);
@@ -191,6 +262,50 @@ int main(void){
             }
         }
 
+        // Periodic ACK from replica to primary
+        if(server.repl_client && server.repl_client->state == REPL_CLIENT_STREAMING){
+            if(now_ms - server.repl_client->last_ack_ms >= 1000){
+                replica_client_send_ack(server.repl_client);
+                event_loop_mod(server.loop, server.repl_client->fd,
+                               EVENT_READABLE | EVENT_WRITABLE);
+            }
+        }
+
+        // Advance PSYNC snapshot streaming and check snapshot fork children.
+        // repl_check_sync_children returns the count of forks that exited this
+        // tick so we can keep active_forks accurate and know when to resume
+        // hashmap resizing and promote deferred PSYNC requests.
+        int syncs_done = repl_check_sync_children(server.loop);
+        if(syncs_done > 0){
+            server.active_forks -= syncs_done;
+            if(server.active_forks <= 0){
+                server.active_forks = 0;
+                hm_resume_resize(server.store.dict);
+                // Start the next deferred PSYNC, one at a time to avoid
+                // multiple concurrent forks hammering the store.
+                for(int i = 0; i < server.replica_count; i++){
+                    Replica *r = server.replicas[i];
+                    if(r && r->state == REPLICA_PSYNC_PENDING){
+                        launch_replica_sync(r, server.loop);
+                        break;
+                    }
+                }
+            }
+        }
+        repl_advance_snapshot_send(server.loop);
+
+        check_pending_waits();
+
+        // Clean up replicas that were marked dead (output overflow)
+        for(int i = 0; i < server.replica_count; i++){
+            Replica *r = server.replicas[i];
+            if(r && r->dead){
+                int dead_fd = r->fd;
+                close_client(dead_fd, server.loop);
+                i--;  // repl_remove_replica compacted the array
+            }
+        }
+
         // Check if AOF compaction child has finished
         if(server.aof->child_pid > 0){
             int status;
@@ -201,7 +316,8 @@ int main(void){
                     fprintf(stderr, "[AOF] compaction failed — recovered writes from tmp.aof\n");
                     server.aof->last_compaction_file_size = server.aof->file_size;
                     server.aof->child_pid = -1;
-                    hm_resume_resize(server.store.dict);
+                    server.active_forks--;
+                    if(server.active_forks <= 0){ server.active_forks = 0; hm_resume_resize(server.store.dict); }
                     continue;
                 }
 
@@ -210,7 +326,8 @@ int main(void){
                 if(aof_merge_compacted(server.aof) != AOF_OK){
                     fprintf(stderr, "[AOF] compaction failed — merge error\n");
                     server.aof->child_pid = -1;
-                    hm_resume_resize(server.store.dict);
+                    server.active_forks--;
+                    if(server.active_forks <= 0){ server.active_forks = 0; hm_resume_resize(server.store.dict); }
                     continue;
                 }
 
@@ -227,7 +344,8 @@ int main(void){
                 server.aof->file_size = st.st_size;
                 server.aof->last_compaction_file_size = st.st_size;
                 server.aof->child_pid = -1;
-                hm_resume_resize(server.store.dict);
+                server.active_forks--;
+                if(server.active_forks <= 0){ server.active_forks = 0; hm_resume_resize(server.store.dict); }
                 fprintf(stderr, "[AOF] compaction complete — new file size: %llu bytes\n",
                         (unsigned long long)server.aof->file_size);
             }
@@ -248,6 +366,7 @@ int main(void){
                     : 0.0);
 
             hm_pause_resize(server.store.dict);
+            server.active_forks++;
 
             pid_t pid = fork();
             if(pid == 0){
@@ -256,8 +375,9 @@ int main(void){
                 server.aof->child_pid = pid;
             } else {
                 perror("[AOF] fork failed");
-                hm_resume_resize(server.store.dict);
                 server.aof->child_pid = -1;
+                server.active_forks--;
+                if(server.active_forks <= 0){ server.active_forks = 0; hm_resume_resize(server.store.dict); }
             }
         }
     }
@@ -489,6 +609,13 @@ void handle_client_read(int clientfd, event_loop_t *loop, RedisStore *store, AOF
 
         if(res == EE_WRITE_OK){
             aof_add(aof, &command);
+            repl_propagate(&command);
+        } else if(res == EE_PSYNC_FULL_SYNC){
+            handle_psync_full_sync(clientfd, loop);
+        } else if(res == EE_WAIT_PENDING){
+            long numreplicas = strtol(command.args[1].data, NULL, 10);
+            long timeout_ms  = strtol(command.args[2].data, NULL, 10);
+            register_pending_wait(clientfd, repl_get_offset(), (int)numreplicas, timeout_ms);
         }
 
         if(client->output_overflow){
@@ -503,6 +630,21 @@ void handle_client_read(int clientfd, event_loop_t *loop, RedisStore *store, AOF
     }
 
     server.current_client = NULL;
+
+    // Arm writable events for STREAMING replicas that now have backlog data to send.
+    // Replicas drain from the shared ring, not from out_buffer, so update_client_event_mask
+    // (which only checks out_buffer) would never arm them — do it directly here.
+    for(int i = 0; i < server.replica_count; i++){
+        Replica *r = server.replicas[i];
+        if(!r || r->state != REPLICA_STREAMING || r->dead) continue;
+        if(r->fd >= 0 && r->fd < MAX_CLIENT_FDS){
+            ClientState *rc = server.fd_clients[r->fd];
+            if(rc && rc->event_mask != (EVENT_READABLE | EVENT_WRITABLE)){
+                rc->event_mask = EVENT_READABLE | EVENT_WRITABLE;
+                event_loop_mod(loop, r->fd, EVENT_READABLE | EVENT_WRITABLE);
+            }
+        }
+    }
 
     // Flush all accumulated responses in one shot, then update the event mask once.
     ExecuteResult flush_res = flush_client_output(client);
@@ -520,6 +662,36 @@ void handle_client_write(int clientfd, event_loop_t *loop) {
                           ? server.fd_clients[clientfd] : NULL;
     if(!client) return;
 
+    Replica *r = repl_find_replica(clientfd);
+    if(r && r->state == REPLICA_STREAMING){
+        // Drain any remaining out_buffer data first (e.g. the last snapshot chunk
+        // that was in-flight when we transitioned from SENDING_SNAPSHOT).
+        if(client->out_buffer && client->out_buffer->read_idx < client->out_buffer->used){
+            ExecuteResult flush_res = flush_client_output(client);
+            if(flush_res == EE_SOCK_CLOSED || flush_res == EE_ERR){
+                close_client(clientfd, loop);
+                return;
+            }
+            // Socket is full — come back on the next writable event.
+            if(client->out_buffer->read_idx < client->out_buffer->used) return;
+        }
+
+        // out_buffer is empty — drain from the shared replication backlog.
+        if(repl_backlog_drain_replica(r) < 0){
+            close_client(clientfd, loop);
+            return;
+        }
+
+        int mask = EVENT_READABLE;
+        if(repl_backlog_has_data(r)) mask |= EVENT_WRITABLE;
+        if(mask != client->event_mask){
+            client->event_mask = mask;
+            event_loop_mod(loop, clientfd, mask);
+        }
+        return;
+    }
+
+    // Normal client or snapshot-phase replica: drain out_buffer as before.
     ExecuteResult flush_res = flush_client_output(client);
     if(flush_res == EE_SOCK_CLOSED || flush_res == EE_ERR){
         close_client(clientfd, loop);
@@ -620,6 +792,8 @@ static int update_client_event_mask(ClientState *client, event_loop_t *loop) {
 }
 
 void close_client(int clientfd, event_loop_t *loop) {
+    repl_remove_replica(clientfd);  // no-op if fd is not a replica
+    cancel_pending_waits(clientfd);
     event_loop_del(loop, clientfd, EVENT_READABLE | EVENT_WRITABLE);
 
     if(clientfd < 0 || clientfd >= MAX_CLIENT_FDS) return;
@@ -645,4 +819,179 @@ void *get_in_addr(struct sockaddr *sa){
         return &(((struct sockaddr_in*)sa)->sin_addr);
     }
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+static int any_fork_running(void) {
+    return server.active_forks > 0;
+}
+
+// Fork the snapshot for a replica that is ready to sync.  Can be called
+// immediately (when no fork is running) or deferred (after a prior fork
+// finishes and REPLICA_PSYNC_PENDING replicas are promoted).
+static void launch_replica_sync(Replica *r, event_loop_t *loop) {
+    (void)loop;
+    snprintf(r->sync_file, sizeof(r->sync_file), "fullsync_%d.aof", r->fd);
+
+    hm_pause_resize(server.store.dict);
+    server.active_forks++;
+
+    pid_t pid = fork();
+    if(pid == 0){
+        aof_compact_to_file(&server.store, r->sync_file);
+        // aof_compact_to_file calls _exit() — never returns
+    } else if(pid > 0){
+        r->sync_child_pid = pid;
+        r->state = REPLICA_FULL_SYNC;
+        fprintf(stderr, "[repl] full sync started for fd=%d (child pid=%d)\n", r->fd, pid);
+    } else {
+        perror("[repl] fork failed");
+        server.active_forks--;
+        if(server.active_forks <= 0){ server.active_forks = 0; hm_resume_resize(server.store.dict); }
+        r->dead = 1;
+    }
+}
+
+// Called from handle_client_read when exec_psync returns EE_PSYNC_FULL_SYNC.
+// If another fork is already running we park the replica in PSYNC_PENDING
+// and launch the snapshot once that fork finishes.
+static void handle_psync_full_sync(int clientfd, event_loop_t *loop) {
+    ClientState *client = (clientfd >= 0 && clientfd < MAX_CLIENT_FDS)
+                          ? server.fd_clients[clientfd] : NULL;
+    if(!client){ close_client(clientfd, loop); return; }
+
+    if(repl_add_replica(clientfd, client->out_buffer, server.repl_offset) != 0){
+        fprintf(stderr, "[repl] repl_add_replica failed\n");
+        close_client(clientfd, loop);
+        return;
+    }
+
+    Replica *r = repl_find_replica(clientfd);
+    if(!r){ close_client(clientfd, loop); return; }
+
+    if(any_fork_running()){
+        // Park the replica — writes accumulate in sync_buf until the fork
+        // completes and the event loop promotes it.
+        r->state = REPLICA_PSYNC_PENDING;
+        fprintf(stderr, "[repl] PSYNC fd=%d: deferred (fork already running)\n", clientfd);
+        return;
+    }
+
+    launch_replica_sync(r, loop);
+}
+
+// Park a WAIT that could not be satisfied immediately.
+static void register_pending_wait(int clientfd, uint64_t target, int numreplicas, long timeout_ms) {
+    for (int i = 0; i < MAX_PENDING_WAITS; i++) {
+        if (!server.pending_waits[i].active) {
+            server.pending_waits[i].clientfd      = clientfd;
+            server.pending_waits[i].target_offset = target;
+            server.pending_waits[i].deadline_ms   = monotonic_ms() + (uint64_t)timeout_ms;
+            server.pending_waits[i].numreplicas   = numreplicas;
+            server.pending_waits[i].active        = 1;
+            return;
+        }
+    }
+    // Table full — satisfy immediately with current count so the client isn't
+    // left hanging forever.
+    ClientState *c = server.fd_clients[clientfd];
+    if (c) {
+        server.current_client = c;
+        sendInt(clientfd, repl_count_synced(target));
+        server.current_client = NULL;
+        flush_client_output(c);
+        update_client_event_mask(c, server.loop);
+    }
+}
+
+// Called every event loop tick.  Resolves any parked WAIT whose condition is
+// now met (enough replicas ACK'd) or whose deadline has passed.
+static void check_pending_waits(void) {
+    uint64_t now = monotonic_ms();
+    for (int i = 0; i < MAX_PENDING_WAITS; i++) {
+        PendingWait *pw = &server.pending_waits[i];
+        if (!pw->active) continue;
+
+        int synced = repl_count_synced(pw->target_offset);
+        int satisfied = (synced >= pw->numreplicas) || (now >= pw->deadline_ms);
+        if (!satisfied) continue;
+
+        pw->active = 0;
+
+        // Guard against the client having disconnected while waiting.
+        if (pw->clientfd < 0 || pw->clientfd >= MAX_CLIENT_FDS) continue;
+        ClientState *c = server.fd_clients[pw->clientfd];
+        if (!c) continue;
+
+        server.current_client = c;
+        sendInt(pw->clientfd, synced);
+        server.current_client = NULL;
+        flush_client_output(c);
+        update_client_event_mask(c, server.loop);
+    }
+}
+
+// Returns the earliest deadline across all active pending WAITs, or UINT64_MAX
+// when none exist.  Used to cap the event_loop_wait timeout.
+static uint64_t next_pending_wait_deadline_ms(void) {
+    uint64_t earliest = UINT64_MAX;
+    for (int i = 0; i < MAX_PENDING_WAITS; i++) {
+        if (server.pending_waits[i].active &&
+            server.pending_waits[i].deadline_ms < earliest) {
+            earliest = server.pending_waits[i].deadline_ms;
+        }
+    }
+    return earliest;
+}
+
+// Drop all pending WAITs for a client that is being closed.
+static void cancel_pending_waits(int clientfd) {
+    for (int i = 0; i < MAX_PENDING_WAITS; i++) {
+        if (server.pending_waits[i].active && server.pending_waits[i].clientfd == clientfd) {
+            server.pending_waits[i].active = 0;
+        }
+    }
+}
+
+// Establish a non-blocking TCP connection to the primary and create the replica context.
+static int connect_to_primary(const char *host, const char *port, uint16_t our_port) {
+    struct addrinfo hints, *res, *p;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if(getaddrinfo(host, port, &hints, &res) != 0){
+        fprintf(stderr, "[replica] getaddrinfo failed for %s:%s\n", host, port);
+        return -1;
+    }
+
+    int fd = -1;
+    for(p = res; p; p = p->ai_next){
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if(fd == -1) continue;
+        set_nonblocking(fd);
+        int nd = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd));
+        int rv = connect(fd, p->ai_addr, p->ai_addrlen);
+        if(rv == 0 || (rv == -1 && errno == EINPROGRESS)) break;
+        close(fd); fd = -1;
+    }
+    freeaddrinfo(res);
+
+    if(fd == -1){
+        fprintf(stderr, "[replica] could not connect to %s:%s\n", host, port);
+        return -1;
+    }
+
+    server.repl_client = replica_client_create(fd, our_port);
+    if(!server.repl_client){ close(fd); return -1; }
+
+    if(event_loop_add(server.loop, fd, EVENT_WRITABLE) == -1){
+        replica_client_destroy(server.repl_client);
+        server.repl_client = NULL;
+        close(fd);
+        return -1;
+    }
+
+    printf("[replica] connecting to primary %s:%s\n", host, port);
+    return 0;
 }

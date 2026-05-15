@@ -52,6 +52,7 @@ SERVER_SRCS = $(SERVER_SRC_DIR)/server.c \
 			  $(SERVER_SRC_DIR)/aof/aof_load.c \
 			  $(SERVER_SRC_DIR)/aof/aof_compact.c \
 			  $(SERVER_SRC_DIR)/aof/aof_resp_encode.c \
+			  $(SERVER_SRC_DIR)/replication/replication.c \
               $(EVENT_LOOP_SRC)
 
 # Client source files

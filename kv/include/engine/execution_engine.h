@@ -10,7 +10,7 @@
 typedef struct RedisCommand RedisCommand;
 typedef struct RedisStore RedisStore;
 
-typedef enum { 
+typedef enum {
     EE_OK,
     EE_WRITE_OK,
     EE_OOM,
@@ -19,6 +19,8 @@ typedef enum {
     EE_SOCK_CLOSED,
     EE_KEY_TOO_LONG,
     EE_ERR_ARITY,
+    EE_PSYNC_FULL_SYNC,   // PSYNC accepted; caller must fork snapshot
+    EE_WAIT_PENDING,      // WAIT not yet satisfiable; caller must park a deferred reply
 } ExecuteResult;
 
 #define MAX_KEY_SIZE (25 * 1024 * 1024)

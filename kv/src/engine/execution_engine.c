@@ -16,6 +16,8 @@ ExecuteResult exec_zrange(int clientfd, RedisCommand *command, RedisStore *store
 ExecuteResult exec_ping(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_flush(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_wait(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_replconf(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_psync(int clientfd, RedisCommand *command, RedisStore *store);
 
 static ExecuteResult exec_command(int clientfd, RedisCommand *command, RedisStore *store);
 static ExecuteResult _validate_key_sizes(int clientfd, RedisCommand *command, const struct CommandEntry *entry);
@@ -39,6 +41,8 @@ static struct CommandEntry commandTable[] = {
     {"command",   7,   -1,   CMD_FLAG_READONLY,                          0,    0,   0,    exec_command},
     {"flushdb",   7,   1,    CMD_FLAG_ADMIN | CMD_FLAG_WRITE,            0,    0,   0,    exec_flush},
     {"wait",      4,   3,    0,                                          0,    0,   0,    exec_wait},
+    {"replconf",  8,  -3,    CMD_FLAG_ADMIN,                             0,    0,   0,    exec_replconf},
+    {"psync",     5,   3,    CMD_FLAG_ADMIN,                             0,    0,   0,    exec_psync},
 };
 
 static struct FlagMap flagMap[] = {
