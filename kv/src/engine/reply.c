@@ -85,6 +85,15 @@ ExecuteResult sendInt(int clientfd, int integerToSend) {
     return _sendRaw(clientfd, buf, len);
 }
 
+ExecuteResult sendInt64(int clientfd, long long integerToSend) {
+    if (clientfd == -1) {
+        return EE_OK;
+    }
+    char buf[24]; // ':' + up to 20 digits + sign + "\r\n"
+    int len = snprintf(buf, sizeof(buf), ":%lld\r\n", integerToSend);
+    return _sendRaw(clientfd, buf, len);
+}
+
 ExecuteResult sendArrayHeader(int clientfd, int count) {
     if (clientfd == -1) {
         return EE_OK;

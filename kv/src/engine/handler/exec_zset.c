@@ -109,6 +109,70 @@ ExecuteResult exec_zrem(int clientfd, RedisCommand *command, RedisStore *store) 
     return EE_OK;
 }
 
+// ZPOPMIN key [count] — atomic pop-and-remove of the `count` lowest-scored
+// members (default 1). This fuses the ZRANGE-then-ZREM claim into one command,
+// closing the TOCTOU race where two workers both read the same head member
+// before either removes it. Single-threaded execution makes it atomic; the raw
+// command replays deterministically on replicas/AOF (same lowest members).
+ExecuteResult exec_zpopmin(int clientfd, RedisCommand *command, RedisStore *store) {
+    BulkString *key_str = &command->args[1];
+
+    long count = 1;
+    if (command->arg_count >= 3) {
+        if (_parseLong(&command->args[2], &count) != EE_OK || count < 0) {
+            sendError(clientfd, "value is out of range, must be positive");
+            return EE_OK;
+        }
+    }
+
+    Zset *zset = NULL;
+    enum RS_RESULT res = rs_get_zset(store, key_str, &zset);
+    if (res == RS_NOT_FOUND) {
+        return sendArrayHeader(clientfd, 0);
+    } else if (res == RS_WRONG_TYPE) {
+        sendError(clientfd, "WRONGTYPE Operation against a key holding the wrong kind of value");
+        return EE_OK;
+    } else if (res != RS_OK) {
+        sendError(clientfd, "Internal server error");
+        return EE_OK;
+    }
+
+    long avail  = (long)zset->sl->size;
+    long to_pop = (count < avail) ? count : avail;
+    if (to_pop == 0) {
+        return sendArrayHeader(clientfd, 0);
+    }
+
+    // Reply is a flat array [member, score, member, score, ...].
+    sendArrayHeader(clientfd, (int)(to_pop * 2));
+
+    // Repeatedly take the current minimum (rank 0) and remove it. Removing the
+    // head shifts the next-lowest into rank 0, so we re-seek each iteration
+    // rather than hold an iterator across a mutation (which frees nodes).
+    // The member pointer stays valid until rs_zset_remove_member frees it, so
+    // we send its bytes before removing.
+    for (long i = 0; i < to_pop; i++) {
+        SkipListIterator it = sl_iterator_rank(zset->sl, 0, 0);
+        ZSetMember *m = sl_next(&it);
+        if (m == NULL) break; // defensive: size said otherwise
+
+        sendBulkString(clientfd, m->key, m->key_len);
+        char score_buf[64];
+        int score_len = snprintf(score_buf, sizeof(score_buf), "%g", m->score);
+        sendBulkString(clientfd, score_buf, score_len);
+
+        BulkString member_bs = { .data = m->key, .len = m->key_len };
+        rs_zset_remove_member(zset, &member_bs);
+    }
+
+    // Redis convention: an emptied sorted set deletes its key.
+    if (zset->sl->size == 0) {
+        rs_delete(store, key_str);
+    }
+
+    return EE_OK;
+}
+
 ExecuteResult exec_zrange(int clientfd, RedisCommand *command, RedisStore *store) {
     BulkString *key_str   = &command->args[1];
     BulkString *start_str = &command->args[2];
