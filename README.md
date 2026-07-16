@@ -6,7 +6,7 @@ Full writeup at [naqvi.dev/projects/dist_kv](https://naqvi.dev/projects/dist_kv)
 
 ## Supported Commands
 
-`GET` · `SET` · `DEL` · `ZADD` · `ZSCORE` · `ZREM` · `ZRANGE` · `PING` · `COMMAND` · `FLUSHDB` · `WAIT`
+`GET` · `SET` · `DEL` · `INCR` · `DECR` · `INCRBY` · `DECRBY` · `ZADD` · `ZSCORE` · `ZREM` · `ZRANGE` · `ZPOPMIN` · `PING` · `COMMAND` · `FLUSHDB` · `WAIT`
 
 ## Build & Run
 
@@ -65,5 +65,7 @@ Benchmarked against Redis 7 on macOS (Apple M-series), release build. All runs: 
 - **Leader–replica replication** — replicas connect via `--replicaof`; handshake uses `REPLCONF`/`PSYNC`; write propagation flows through the same output-buffer machinery as normal clients, so replication adds zero extra syscalls on the leader's hot path
 
 ## Next
+- Job-queue broker mode: expiry/TTL subsystem, `SET NX EX` options, and a blocking `BZPOPMIN` claim (see `notes/TODO_QUEUE.md`)
 - Lists
-- Atomic operations like INCR/DECR (for use in job pipeline!)
+
+Atomic counters (`INCR`/`DECR`/`INCRBY`/`DECRBY`) and the fused `ZPOPMIN` claim are done — Phase 1 of the job-pipeline plan.
