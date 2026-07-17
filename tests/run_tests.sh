@@ -50,7 +50,7 @@ echo "================ INTEGRATION ================="
 export LLVM_PROFILE_FILE="$PROFDIR/server-%p%c.profraw"
 
 PORT=7010
-for t in test_commands test_expiry test_durability test_compaction test_aof_load test_replication; do
+for t in test_commands test_expiry test_set_options test_bzpopmin test_queue test_durability test_compaction test_aof_load test_replication; do
     echo "---- $t ----"
     "$PY" "tests/integration/$t.py" "$SERVER_BIN" "$PORT" || fail=1
     PORT=$((PORT + 10))

@@ -4,5 +4,6 @@
 #include <stdint.h>
 
 uint64_t monotonic_ms();
+uint64_t wallclock_ms();
 
 #endif

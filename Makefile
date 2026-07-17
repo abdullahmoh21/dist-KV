@@ -37,6 +37,7 @@ SERVER_SRCS = $(SERVER_SRC_DIR)/server.c \
               $(SERVER_SRC_DIR)/engine/execution_engine.c \
               $(SERVER_SRC_DIR)/engine/reply.c \
               $(SERVER_SRC_DIR)/engine/handler/exec_kv.c \
+              $(SERVER_SRC_DIR)/engine/handler/exec_expire.c \
               $(SERVER_SRC_DIR)/engine/handler/exec_zset.c \
               $(SERVER_SRC_DIR)/engine/handler/exec_misc.c \
               $(SERVER_SRC_DIR)/parser/resp_parser.c \
@@ -159,6 +160,50 @@ help:
 .PHONY: test-compact
 test-compact:
 	@bash scripts/run_compact_test.sh
+
+# ---------------------------------------------------------------------------
+# Test suite + coverage (clang source-based coverage)
+# ---------------------------------------------------------------------------
+# Two instrumented binaries share one coverage profile:
+#   server_cov  - the full server (all sources incl. server.c + event loop),
+#                 driven by the Python integration tests over a socket.
+#   unit_tests  - every module EXCEPT server.c / the event loop, linked with
+#                 the C unit suites; drives the storage/parser/engine layers
+#                 in-process (dispatch_command via an injectable reply writer).
+# llvm-cov aggregates both binaries against the merged profile, so a line
+# covered by EITHER layer counts once.
+COV_DIR   = build/cov
+COVFLAGS  = -Wall -Wextra -std=c11 -g -O0 -DDEBUG \
+            -fprofile-instr-generate -fcoverage-mapping
+# Only server.c (owns main + the global `server`) is excluded. The event-loop
+# source stays: replication.c link-references event_loop_mod, and exec_misc
+# link-references the repl_* symbols. Those files aren't *exercised* by the unit
+# suites, but they must resolve at link time; their coverage comes from server_cov.
+UNIT_SRCS = $(filter-out $(SERVER_SRC_DIR)/server.c,$(SERVER_SRCS)) \
+            $(wildcard tests/unit/*.c)
+
+.PHONY: test-build
+test-build: $(COV_DIR)/server_cov $(COV_DIR)/unit_tests
+
+$(COV_DIR)/server_cov: $(SERVER_SRCS) $(SERVER_HEADERS)
+	@mkdir -p $(COV_DIR)
+	@echo "Building instrumented server_cov..."
+	$(CC) $(COVFLAGS) $(INCLUDES) $(SERVER_SRCS) -o $@
+
+$(COV_DIR)/unit_tests: $(UNIT_SRCS) $(SERVER_HEADERS)
+	@mkdir -p $(COV_DIR)
+	@echo "Building instrumented unit_tests..."
+	$(CC) $(COVFLAGS) $(INCLUDES) -Itests/unit $(UNIT_SRCS) -o $@
+
+# Full suite + coverage report; fails if total line coverage < THRESHOLD.
+.PHONY: test
+test: test-build
+	@bash tests/run_tests.sh
+
+# Just the C unit tests, no coverage gate.
+.PHONY: test-unit
+test-unit: $(COV_DIR)/unit_tests
+	@LLVM_PROFILE_FILE=/dev/null $(COV_DIR)/unit_tests
 
 # Alias targets
 .PHONY: server client

@@ -6,7 +6,13 @@ Full writeup at [naqvi.dev/projects/dist_kv](https://naqvi.dev/projects/dist_kv)
 
 ## Supported Commands
 
-`GET` · `SET` · `DEL` · `INCR` · `DECR` · `INCRBY` · `DECRBY` · `ZADD` · `ZSCORE` · `ZREM` · `ZRANGE` · `ZPOPMIN` · `PING` · `COMMAND` · `FLUSHDB` · `WAIT`
+**Key/value & counters** — `GET` · `SET` (`NX`/`XX`/`GET`/`EX`/`PX`) · `DEL` · `INCR` · `DECR` · `INCRBY` · `DECRBY`
+
+**Expiry / TTL** — `EXPIRE` · `PEXPIRE` · `PEXPIREAT` · `TTL` · `PTTL` · `PERSIST`
+
+**Sorted sets** — `ZADD` · `ZSCORE` · `ZREM` · `ZRANGE` (`BYSCORE`/`WITHSCORES`) · `ZPOPMIN` · `BZPOPMIN` (blocking)
+
+**Admin / replication** — `PING` · `COMMAND` · `FLUSHDB` · `WAIT` · `REPLCONF` · `PSYNC`
 
 ## Build & Run
 
@@ -64,8 +70,11 @@ Benchmarked against Redis 7 on macOS (Apple M-series), release build. All runs: 
 - **Fork-based AOF compaction** — child gets a copy-on-write snapshot via `fork()`, serialises the full store to `compacted.aof`, parent polls with `WNOHANG`. Uses `mmap(MAP_ANON|MAP_PRIVATE)` in the child (malloc is unsafe post-fork in a multithreaded process)
 - **Leader–replica replication** — replicas connect via `--replicaof`; handshake uses `REPLCONF`/`PSYNC`; write propagation flows through the same output-buffer machinery as normal clients, so replication adds zero extra syscalls on the leader's hot path
 
-## Next
-- Job-queue broker mode: expiry/TTL subsystem, `SET NX EX` options, and a blocking `BZPOPMIN` claim (see `notes/TODO_QUEUE.md`)
-- Lists
+## Job-queue broker mode
 
-Atomic counters (`INCR`/`DECR`/`INCRBY`/`DECRBY`) and the fused `ZPOPMIN` claim are done — Phase 1 of the job-pipeline plan.
+dist-KV doubles as a single-node at-least-once job-queue broker for a worker fleet — no new data type, no consensus. The queue is a ZSET (`score` = priority/enqueue-time, `member` = job id); workers claim atomically with `ZPOPMIN`/`BZPOPMIN`, a claimed job moves to a `processing:<id>` key with a visibility-timeout TTL, and a client-side reaper (elected via `SET lock:reaper 1 NX EX`) re-enqueues any job whose worker died before acking. Every piece is a server primitive — the visibility/reaper logic lives in the client, off the single-threaded hot path.
+
+All five build phases are shipped (atomic counters + fused claim → expiry subsystem → `SET` options → blocking `BZPOPMIN` → hardening + integration tests). See `notes/TODO_QUEUE.md` for the design and `tests/integration/test_queue.py` for the end-to-end reaper / crash-recovery / replica proof.
+
+## Next
+- Lists (`LPUSH`/`RPUSH`/`BRPOP`) for FIFO queues alongside the ZSET priority queue

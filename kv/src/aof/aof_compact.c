@@ -12,6 +12,7 @@
 // --- Forward Declarations ---
 static enum AOF_RESULT _buffer_ensure_space(int fd, struct Buffer *buf, size_t needed);
 static enum AOF_RESULT _write_kv_compaction(int aof_fd, struct Buffer *buf, RedisObject *obj);
+static enum AOF_RESULT _write_pexpireat_compaction(int aof_fd, struct Buffer *buf, RedisObject *obj);
 static enum AOF_RESULT _append_set_buf(struct Buffer *buf, RedisObject *obj);
 static enum AOF_RESULT _write_zset_compaction(int aof_fd, struct Buffer *buf, RedisObject *obj);
 static enum AOF_RESULT _ensure_and_append_zadd(int aof_fd, struct Buffer *buf, const char *key, size_t key_len, struct ZSetMember **members, int count, size_t batch_len);
@@ -65,9 +66,19 @@ void aof_compact_to_file(RedisStore *store, const char *filename) {
     void *current = NULL;
     int success = 1;
 
+    // Wall-clock snapshot for the whole pass — decides which keys are already
+    // logically gone (skip) vs. still live with a TTL to re-emit.
+    uint64_t now = wallclock_ms();
+
     // walk the store
     while (hm_it_next(&h_it, &current) == HM_OK) {
         RedisObject *obj = (RedisObject*) current;
+
+        // Don't serialize a key whose deadline has already passed — it's gone.
+        if (obj->expire_at_ms != 0 && now >= obj->expire_at_ms) {
+            continue;
+        }
+
         enum AOF_RESULT res = AOF_OK;
 
         if (obj->type == T_KV) {
@@ -79,6 +90,16 @@ void aof_compact_to_file(RedisStore *store, const char *filename) {
         if (res != AOF_OK) {
             success = 0;
             break;
+        }
+
+        // Re-emit the absolute deadline right after the SET/ZADD, or the TTL
+        // would vanish on every compaction.
+        if (obj->expire_at_ms != 0) {
+            res = _write_pexpireat_compaction(aof_fd, buf, obj);
+            if (res != AOF_OK) {
+                success = 0;
+                break;
+            }
         }
     }
 
@@ -227,6 +248,44 @@ static enum AOF_RESULT _append_set_buf(struct Buffer *buf, RedisObject *obj) {
     _append_len(buf, obj->data_len);
     memcpy(buf->data + buf->used, obj->data, obj->data_len);
     buf->used += obj->data_len; 
+    buf->data[buf->used++] = '\r';
+    buf->data[buf->used++] = '\n';
+
+    return AOF_OK;
+}
+
+// --- Expiry Compaction ---
+// Emits `PEXPIREAT <key> <abs-ms>` so a key's absolute deadline survives the
+// snapshot. Must run AFTER the SET/ZADD for the same key so replay order is
+// create-then-expire.
+static enum AOF_RESULT _write_pexpireat_compaction(int aof_fd, struct Buffer *buf, RedisObject *obj) {
+    char valbuf[24];
+    int vlen = snprintf(valbuf, sizeof(valbuf), "%llu", (unsigned long long)obj->expire_at_ms);
+    if (vlen < 0) return AOF_ERR;
+
+    // "*3\r\n$9\r\nPEXPIREAT\r\n" + key bulk + value bulk, with slack for the $len headers.
+    size_t bytes_needed = 32 + obj->key_len + _digits(obj->key_len) + (size_t)vlen + _digits((size_t)vlen);
+    enum AOF_RESULT space_res = _buffer_ensure_space(aof_fd, buf, bytes_needed);
+    if (space_res != AOF_OK) return space_res;
+
+    memcpy(buf->data + buf->used, "*3\r\n", 4);
+    buf->used += 4;
+
+    _append_len(buf, 9);
+    memcpy(buf->data + buf->used, "PEXPIREAT", 9);
+    buf->used += 9;
+    buf->data[buf->used++] = '\r';
+    buf->data[buf->used++] = '\n';
+
+    _append_len(buf, obj->key_len);
+    memcpy(buf->data + buf->used, obj->key, obj->key_len);
+    buf->used += obj->key_len;
+    buf->data[buf->used++] = '\r';
+    buf->data[buf->used++] = '\n';
+
+    _append_len(buf, (size_t)vlen);
+    memcpy(buf->data + buf->used, valbuf, (size_t)vlen);
+    buf->used += (size_t)vlen;
     buf->data[buf->used++] = '\r';
     buf->data[buf->used++] = '\n';
 

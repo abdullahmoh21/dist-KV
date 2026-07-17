@@ -5,6 +5,7 @@
 #include "store/redis_store.h"
 #include "engine/execution_engine.h"
 #include "engine/reply.h"
+#include "engine/blocking.h"
 #include "parser/resp_parser.h"
 #include "event_loop/event_loop.h"
 #include "replication/replication.h"
@@ -35,6 +36,7 @@
 // Size must exceed the process's open-file limit; 4096 is safe for typical deployments.
 #define MAX_CLIENT_FDS 4096
 #define MAX_PENDING_WAITS 256
+#define MAX_PENDING_POPS  256
 
 // Client connection state
 typedef struct {
@@ -56,6 +58,19 @@ typedef struct {
     int      active;          // 1 = slot in use
 } PendingWait;
 
+// A BZPOPMIN that found no job on any of its keys.  The client is parked here
+// and re-tried each event loop tick, so a producer's ZADD (which wakes the loop
+// anyway) serves it with sub-tick latency — no polling, and no ZADD hook.
+typedef struct {
+    int         clientfd;
+    uint64_t    deadline_ms;  // absolute monotonic; UINT64_MAX = block forever
+    uint64_t    seq;          // arrival order — oldest waiter is served first
+    BulkString *keys;         // heap copy: command args die when the frame is freed
+    char       *keybuf;       // backing bytes for keys[]
+    int         nkeys;
+    int         active;       // 1 = slot in use
+} PendingPop;
+
 // Server-wide state — single instance, file-static
 typedef struct {
     int fd;
@@ -70,6 +85,8 @@ typedef struct {
     ReplClientContext *repl_client;  // non-NULL when running in --replicaof mode
     int active_forks;           // running fork children (AOF compact + PSYNC snapshots)
     PendingWait pending_waits[MAX_PENDING_WAITS];
+    PendingPop  pending_pops[MAX_PENDING_POPS];
+    uint64_t    pop_seq;        // monotonically increasing arrival ticket
 } Server;
 
 static Server server;
@@ -90,9 +107,15 @@ static void launch_replica_sync(Replica *r, event_loop_t *loop);
 static int connect_to_primary(const char *host, const char *port, uint16_t our_port);
 static int any_fork_running(void);
 static void register_pending_wait(int clientfd, uint64_t target, int numreplicas, long timeout_ms);
+static void active_expire_del_cb(const char *key, size_t key_len, void *ctx);
 static uint64_t next_pending_wait_deadline_ms(void);
 static void check_pending_waits(void);
 static void cancel_pending_waits(int clientfd);
+static void register_pending_pop(int clientfd, RedisCommand *command);
+static uint64_t next_pending_pop_deadline_ms(void);
+static void check_pending_pops(void);
+static void cancel_pending_pops(int clientfd);
+static void propagate_frame(const char *frame, size_t len);
 
 int main(int argc, char *argv[]){
     const char *server_port   = DEFAULT_PORT;
@@ -215,6 +238,8 @@ int main(int argc, char *argv[]){
         uint64_t next_wakeup_ms = next_flush_ms;
         uint64_t pw_deadline = next_pending_wait_deadline_ms();
         if (pw_deadline < next_wakeup_ms) next_wakeup_ms = pw_deadline;
+        uint64_t pp_deadline = next_pending_pop_deadline_ms();
+        if (pp_deadline < next_wakeup_ms) next_wakeup_ms = pp_deadline;
         int timeout_ms = (next_wakeup_ms > now_ms) ? ((int)(next_wakeup_ms - now_ms)) : 0;
         int n = event_loop_wait(server.loop, timeout_ms, events, MAX_EVENTS);
 
@@ -295,6 +320,19 @@ int main(int argc, char *argv[]){
         repl_advance_snapshot_send(server.loop);
 
         check_pending_waits();
+
+        // Serve parked BZPOPMINs. Runs after the readable events above, so a
+        // producer's ZADD this tick wakes a blocked worker immediately.
+        check_pending_pops();
+
+        // Active expiry: reclaim keys whose deadline passed even if nothing
+        // accessed them (a dead worker's processing:<id>). Skipped while a fork
+        // is live so we don't churn COW pages the compaction/PSYNC child shares,
+        // and because rehash-sensitive deletes must wait out hm_pause_resize.
+        // Lazy expiry still covers accessed keys in the meantime.
+        if(server.active_forks == 0){
+            rs_active_expire_cycle(&server.store, wallclock_ms(), active_expire_del_cb, NULL);
+        }
 
         // Clean up replicas that were marked dead (output overflow)
         for(int i = 0; i < server.replica_count; i++){
@@ -616,6 +654,8 @@ void handle_client_read(int clientfd, event_loop_t *loop, RedisStore *store, AOF
             long numreplicas = strtol(command.args[1].data, NULL, 10);
             long timeout_ms  = strtol(command.args[2].data, NULL, 10);
             register_pending_wait(clientfd, repl_get_offset(), (int)numreplicas, timeout_ms);
+        } else if(res == EE_POP_PENDING){
+            register_pending_pop(clientfd, &command);
         }
 
         if(client->output_overflow){
@@ -794,6 +834,7 @@ static int update_client_event_mask(ClientState *client, event_loop_t *loop) {
 void close_client(int clientfd, event_loop_t *loop) {
     repl_remove_replica(clientfd);  // no-op if fd is not a replica
     cancel_pending_waits(clientfd);
+    cancel_pending_pops(clientfd);
     event_loop_del(loop, clientfd, EVENT_READABLE | EVENT_WRITABLE);
 
     if(clientfd < 0 || clientfd >= MAX_CLIENT_FDS) return;
@@ -930,6 +971,40 @@ static void check_pending_waits(void) {
     }
 }
 
+// Called by the active-expiry sweep for each key it reaps. On a master we
+// propagate a DEL so the AOF and replicas learn the key is gone; a replica
+// (server.repl_client != NULL) only reaps locally and never originates writes.
+// Replicas converge on the same instant anyway because the deadline is absolute.
+static void active_expire_del_cb(const char *key, size_t key_len, void *ctx) {
+    (void)ctx;
+    if (server.repl_client) return;
+    if (!server.aof) return;
+
+    char hdr[64];
+    int hlen = snprintf(hdr, sizeof(hdr), "*2\r\n$3\r\nDEL\r\n$%zu\r\n", key_len);
+    if (hlen < 0) return;
+
+    size_t total = (size_t)hlen + key_len + 2;  // header + key + trailing CRLF
+    char *frame = malloc(total);
+    if (!frame) return;
+    memcpy(frame, hdr, (size_t)hlen);
+    memcpy(frame + hlen, key, key_len);
+    frame[total - 2] = '\r';
+    frame[total - 1] = '\n';
+
+    // aof_add / repl_propagate only read raw_start/raw_len — args stay unused.
+    RedisCommand cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.args      = cmd.inline_args;
+    cmd.arg_count = 0;
+    cmd.raw_start = frame;
+    cmd.raw_len   = total;
+
+    aof_add(server.aof, &cmd);
+    repl_propagate(&cmd);
+    free(frame);
+}
+
 // Returns the earliest deadline across all active pending WAITs, or UINT64_MAX
 // when none exist.  Used to cap the event_loop_wait timeout.
 static uint64_t next_pending_wait_deadline_ms(void) {
@@ -948,6 +1023,168 @@ static void cancel_pending_waits(int clientfd) {
     for (int i = 0; i < MAX_PENDING_WAITS; i++) {
         if (server.pending_waits[i].active && server.pending_waits[i].clientfd == clientfd) {
             server.pending_waits[i].active = 0;
+        }
+    }
+}
+
+// Send a pre-built RESP frame to the AOF and the replicas.  Used for writes that
+// originate outside the dispatch path's EE_WRITE_OK gate — the active-expiry DEL
+// and the parked BZPOPMIN serve.  aof_add / repl_propagate only read
+// raw_start/raw_len, so args stay unused.
+static void propagate_frame(const char *frame, size_t len) {
+    if (!server.aof || server.repl_client) return;   // replicas never originate writes
+
+    RedisCommand cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.args      = cmd.inline_args;
+    cmd.arg_count = 0;
+    cmd.raw_start = (char *)frame;
+    cmd.raw_len   = len;
+
+    aof_add(server.aof, &cmd);
+    repl_propagate(&cmd);
+}
+
+static void free_pending_pop(PendingPop *pp) {
+    free(pp->keys);
+    free(pp->keybuf);
+    pp->keys   = NULL;
+    pp->keybuf = NULL;
+    pp->active = 0;
+}
+
+// Park a BZPOPMIN that found nothing.  The command frame is freed as soon as
+// dispatch returns, so the watched keys must be copied.
+static void register_pending_pop(int clientfd, RedisCommand *command) {
+    int slot = -1;
+    for (int i = 0; i < MAX_PENDING_POPS; i++) {
+        if (!server.pending_pops[i].active) { slot = i; break; }
+    }
+
+    ClientState *c = (clientfd >= 0 && clientfd < MAX_CLIENT_FDS) ? server.fd_clients[clientfd] : NULL;
+
+    // Table full — reply null now rather than leave the worker hanging forever.
+    if (slot < 0) {
+        if (c) {
+            server.current_client = c;
+            sendNullArray(clientfd);
+            server.current_client = NULL;
+        }
+        return;
+    }
+
+    int nkeys = command->arg_count - 2;
+    size_t total = 0;
+    for (int i = 0; i < nkeys; i++) total += command->args[1 + i].len;
+
+    PendingPop *pp = &server.pending_pops[slot];
+    pp->keys   = malloc(sizeof(BulkString) * (size_t)nkeys);
+    pp->keybuf = malloc(total ? total : 1);
+    if (!pp->keys || !pp->keybuf) {
+        free(pp->keys); free(pp->keybuf);
+        pp->keys = NULL; pp->keybuf = NULL;
+        if (c) {
+            server.current_client = c;
+            sendError(clientfd, "Server ran out of memory");
+            server.current_client = NULL;
+        }
+        return;
+    }
+
+    size_t off = 0;
+    for (int i = 0; i < nkeys; i++) {
+        BulkString *src = &command->args[1 + i];
+        memcpy(pp->keybuf + off, src->data, src->len);
+        pp->keys[i].data = pp->keybuf + off;
+        pp->keys[i].len  = src->len;
+        off += src->len;
+    }
+
+    // Timeout is in seconds and may be fractional; the handler already validated
+    // it as a non-negative double. 0 means block indefinitely.
+    double timeout = strtod(command->args[command->arg_count - 1].data, NULL);
+    pp->clientfd    = clientfd;
+    pp->nkeys       = nkeys;
+    pp->deadline_ms = (timeout > 0)
+                      ? monotonic_ms() + (uint64_t)(timeout * 1000.0)
+                      : UINT64_MAX;
+    pp->seq         = server.pop_seq++;
+    pp->active      = 1;
+}
+
+// Called every event loop tick.  Re-tries each parked BZPOPMIN oldest-first
+// (arrival-order fairness), and times out those past their deadline.
+static void check_pending_pops(void) {
+    int idx[MAX_PENDING_POPS], n = 0;
+    for (int i = 0; i < MAX_PENDING_POPS; i++) {
+        if (server.pending_pops[i].active) idx[n++] = i;
+    }
+    if (n == 0) return;
+
+    // Insertion-sort by arrival ticket: the longest-waiting worker gets the job.
+    for (int i = 1; i < n; i++) {
+        int k = idx[i], j = i - 1;
+        while (j >= 0 && server.pending_pops[idx[j]].seq > server.pending_pops[k].seq) {
+            idx[j + 1] = idx[j];
+            j--;
+        }
+        idx[j + 1] = k;
+    }
+
+    uint64_t now = monotonic_ms();
+    for (int i = 0; i < n; i++) {
+        PendingPop *pp = &server.pending_pops[idx[i]];
+
+        // The client may have disconnected while parked.
+        ClientState *c = (pp->clientfd >= 0 && pp->clientfd < MAX_CLIENT_FDS)
+                         ? server.fd_clients[pp->clientfd] : NULL;
+        if (!c) { free_pending_pop(pp); continue; }
+
+        server.current_client = c;
+        const char *frame = NULL;
+        size_t flen = 0;
+        int served = zset_serve_blocking_pop(pp->clientfd, &server.store,
+                                             pp->keys, pp->nkeys, &frame, &flen);
+        server.current_client = NULL;
+
+        if (served == 0 && now < pp->deadline_ms) continue;   // still waiting
+
+        if (served > 0) {
+            // Outside the dispatch EE_WRITE_OK gate, so this pop must propagate
+            // itself or the claim is lost on AOF replay / on the replica.
+            propagate_frame(frame, flen);
+        } else if (served == 0) {
+            server.current_client = c;
+            sendNullArray(pp->clientfd);       // deadline passed, nothing claimed
+            server.current_client = NULL;
+        }
+        // served < 0: WRONGTYPE, error already replied.
+
+        free_pending_pop(pp);
+        flush_client_output(c);
+        update_client_event_mask(c, server.loop);
+    }
+}
+
+// Returns the earliest deadline across all parked BZPOPMINs, or UINT64_MAX when
+// none exist (or all block forever).  Caps the event_loop_wait timeout so a
+// timeout fires on time even with no traffic.
+static uint64_t next_pending_pop_deadline_ms(void) {
+    uint64_t earliest = UINT64_MAX;
+    for (int i = 0; i < MAX_PENDING_POPS; i++) {
+        if (server.pending_pops[i].active &&
+            server.pending_pops[i].deadline_ms < earliest) {
+            earliest = server.pending_pops[i].deadline_ms;
+        }
+    }
+    return earliest;
+}
+
+// Drop all parked BZPOPMINs for a client that is being closed.
+static void cancel_pending_pops(int clientfd) {
+    for (int i = 0; i < MAX_PENDING_POPS; i++) {
+        if (server.pending_pops[i].active && server.pending_pops[i].clientfd == clientfd) {
+            free_pending_pop(&server.pending_pops[i]);
         }
     }
 }
