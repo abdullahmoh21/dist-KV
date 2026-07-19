@@ -65,7 +65,5 @@ Benchmarked against Redis 7 on macOS (Apple M-series), release build. All runs: 
 - **Leader–replica replication** — replicas connect via `--replicaof`; handshake uses `REPLCONF`/`PSYNC`; write propagation flows through the same output-buffer machinery as normal clients, so replication adds zero extra syscalls on the leader's hot path
 
 ## Next
-- Job-queue broker mode: expiry/TTL subsystem, `SET NX EX` options, and a blocking `BZPOPMIN` claim (see `notes/TODO_QUEUE.md`)
-- Lists
-
-Atomic counters (`INCR`/`DECR`/`INCRBY`/`DECRBY`) and the fused `ZPOPMIN` claim are done — Phase 1 of the job-pipeline plan.
+- Job-queue broker mode: expiry/TTL subsystem, `SET NX EX` options
+- Lists (maybe)
