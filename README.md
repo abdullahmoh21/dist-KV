@@ -24,6 +24,16 @@ make run-server   # build and start on :6379
 
 The build is OS-aware: `kqueue` on macOS, `epoll` on Linux — selected automatically. If you use windows, please don't. 
 
+## Tests
+
+```bash
+make test         # full suite: C unit tests + Python integration tests, with coverage
+make test-unit    # C unit tests only, no coverage gate
+make test-compact # AOF compaction integration test
+```
+
+`make test` builds two clang-instrumented binaries — the unit suites exercise the storage/parser/engine layers in-process, the Python suite drives the full server over a socket — merges their coverage, and fails if total line coverage drops below 80%.
+
 ## Performance
 
 Benchmarked against Redis 7 on macOS (Apple M-series), release build. All runs: 100K requests, 50 parallel clients, `redis-benchmark`.
@@ -73,6 +83,15 @@ Benchmarked against Redis 7 on macOS (Apple M-series), release build. All runs: 
 ## Job-queue broker mode
 
 dist-KV doubles as a single-node at-least-once job-queue broker for a worker fleet — no new data type, no consensus. The queue is a ZSET (`score` = priority/enqueue-time, `member` = job id); workers claim atomically with `ZPOPMIN`/`BZPOPMIN`, a claimed job moves to a `processing:<id>` key with a visibility-timeout TTL, and a client-side reaper (elected via `SET lock:reaper 1 NX EX`) re-enqueues any job whose worker died before acking. Every piece is a server primitive — the visibility/reaper logic lives in the client, off the single-threaded hot path.
+
+```bash
+ZADD jobs 1721400000000 email:42        # producer: enqueue, score = priority/time
+BZPOPMIN jobs 0                         # worker: block until a job exists, claim atomically
+SET processing:email:42 worker-7 EX 30  # mark in-flight with a 30s visibility timeout
+DEL processing:email:42                 # ack on success
+# reaper (one worker, elected via SET lock:reaper 1 NX EX 10): any job whose
+# processing:* key expired had a dead worker → ZADD it back onto the queue
+```
 
 All five build phases are shipped (atomic counters + fused claim → expiry subsystem → `SET` options → blocking `BZPOPMIN` → hardening + integration tests). See `notes/TODO_QUEUE.md` for the design and `tests/integration/test_queue.py` for the end-to-end reaper / crash-recovery / replica proof.
 
