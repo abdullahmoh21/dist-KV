@@ -7,6 +7,7 @@
 #include "store/skip_list.h"
 #include "engine/execution_engine.h"
 #include "engine/reply.h"
+#include "engine/blocking.h"
 #include "utils/fast_parse.h"
 
 static ExecuteResult _parseDouble(BulkString *str, double *out) {
@@ -170,6 +171,124 @@ ExecuteResult exec_zpopmin(int clientfd, RedisCommand *command, RedisStore *stor
         rs_delete(store, key_str);
     }
 
+    return EE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// BZPOPMIN — blocking claim
+// ---------------------------------------------------------------------------
+
+// Scratch for the rewritten `ZPOPMIN <key>` propagation frame. Both callers
+// (the handler and the server's parked-serve path) consume it before the next
+// serve can happen, so a single static buffer is safe on this single-threaded
+// event loop.
+static char  *g_bpop_frame = NULL;
+static size_t g_bpop_cap   = 0;
+
+static int _bpop_reserve(size_t need) {
+    if (g_bpop_cap >= need) return 1;
+    size_t cap = g_bpop_cap ? g_bpop_cap : 128;
+    while (cap < need) cap *= 2;
+    char *nb = realloc(g_bpop_frame, cap);
+    if (!nb) return 0;
+    g_bpop_frame = nb;
+    g_bpop_cap   = cap;
+    return 1;
+}
+
+// Build `*2\r\n$7\r\nZPOPMIN\r\n$<len>\r\n<key>\r\n` into the scratch buffer.
+static int _build_zpopmin_frame(const BulkString *key, const char **out, size_t *out_len) {
+    char hdr[32];
+    int hlen = snprintf(hdr, sizeof(hdr), "$%zu\r\n", key->len);
+    if (hlen < 0) return 0;
+
+    size_t need = 4 + 13 + (size_t)hlen + key->len + 2;
+    if (!_bpop_reserve(need)) return 0;
+
+    char *p = g_bpop_frame;
+    memcpy(p, "*2\r\n$7\r\nZPOPMIN\r\n", 17); p += 17;
+    memcpy(p, hdr, (size_t)hlen);            p += hlen;
+    memcpy(p, key->data, key->len);          p += key->len;
+    memcpy(p, "\r\n", 2);                    p += 2;
+
+    *out     = g_bpop_frame;
+    *out_len = (size_t)(p - g_bpop_frame);
+    return 1;
+}
+
+int zset_serve_blocking_pop(int clientfd, RedisStore *store,
+                            const BulkString *keys, int nkeys,
+                            const char **out_frame, size_t *out_len) {
+    for (int i = 0; i < nkeys; i++) {
+        BulkString key = keys[i];   // rs_* take a non-const BulkString*
+        Zset *zset = NULL;
+        enum RS_RESULT r = rs_get_zset(store, &key, &zset);
+
+        if (r == RS_WRONG_TYPE) {
+            sendError(clientfd, "WRONGTYPE Operation against a key holding the wrong kind of value");
+            return -1;
+        }
+        if (r != RS_OK || zset->sl->size == 0) continue;   // absent/expired/empty -> try next key
+
+        SkipListIterator it = sl_iterator_rank(zset->sl, 0, 0);
+        ZSetMember *m = sl_next(&it);
+        if (m == NULL) continue;  // defensive: size said otherwise
+
+        // Build the propagation frame before the member is freed — it borrows
+        // key bytes, which for a parked client live in the PendingPop copy.
+        if (!_build_zpopmin_frame(&key, out_frame, out_len)) {
+            sendError(clientfd, "Server ran out of memory");
+            return -1;
+        }
+
+        // Reply reads m->key, so send before rs_zset_remove_member frees it.
+        sendArrayHeader(clientfd, 3);
+        sendBulkString(clientfd, key.data, key.len);
+        sendBulkString(clientfd, m->key, m->key_len);
+        char score_buf[64];
+        int score_len = snprintf(score_buf, sizeof(score_buf), "%g", m->score);
+        sendBulkString(clientfd, score_buf, score_len);
+
+        BulkString member_bs = { .data = m->key, .len = m->key_len };
+        rs_zset_remove_member(zset, &member_bs);
+
+        // Redis convention: an emptied sorted set deletes its key.
+        if (zset->sl->size == 0) rs_delete(store, &key);
+        return 1;
+    }
+    return 0;
+}
+
+// BZPOPMIN key [key ...] timeout   (timeout in seconds, may be fractional; 0 = forever)
+//
+// Serves immediately when any key has a member. Otherwise returns EE_POP_PENDING
+// and server.c parks the client until a producer ZADDs or the deadline passes.
+ExecuteResult exec_bzpopmin(int clientfd, RedisCommand *command, RedisStore *store) {
+    int nkeys = command->arg_count - 2;   // argv[0]=BZPOPMIN, argv[last]=timeout
+    if (nkeys < 1) {
+        sendError(clientfd, "Wrong number of arguments");
+        return EE_ERR;
+    }
+
+    double timeout;
+    if (_parseDouble(&command->args[command->arg_count - 1], &timeout) != EE_OK) {
+        sendError(clientfd, "timeout is not a float or out of range");
+        return EE_ERR;
+    }
+    if (timeout < 0) {
+        sendError(clientfd, "timeout is negative");
+        return EE_ERR;
+    }
+
+    const char *frame = NULL;
+    size_t flen = 0;
+    int served = zset_serve_blocking_pop(clientfd, store, &command->args[1], nkeys, &frame, &flen);
+    if (served < 0) return EE_ERR;      // error already replied; never propagate
+    if (served == 0) return EE_POP_PENDING;
+
+    // Propagate the effect (`ZPOPMIN key`), never the blocking frame.
+    command->raw_start = (char *)frame;
+    command->raw_len   = flen;
     return EE_OK;
 }
 

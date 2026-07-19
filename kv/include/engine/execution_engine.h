@@ -21,6 +21,8 @@ typedef enum {
     EE_ERR_ARITY,
     EE_PSYNC_FULL_SYNC,   // PSYNC accepted; caller must fork snapshot
     EE_WAIT_PENDING,      // WAIT not yet satisfiable; caller must park a deferred reply
+    EE_OK_NO_PROP,        // write handler succeeded but must NOT propagate (e.g. SET NX no-op)
+    EE_POP_PENDING,       // BZPOPMIN found nothing; caller must park the client on its keys
 } ExecuteResult;
 
 #define MAX_KEY_SIZE (25 * 1024 * 1024)

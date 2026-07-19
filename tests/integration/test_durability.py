@@ -27,7 +27,10 @@ def main():
     c.cmd("SET", "b", "v"); c.cmd("EXPIRE", "b", "100")     # relative -> must become PEXPIREAT
     c.cmd("SET", "dead", "v"); c.cmd("PEXPIRE", "dead", "200")
     c.close()
-    time.sleep(2.6)  # let the active-expiry sweep reap 'dead' AND the 1s AOF flush timer sync it
+    time.sleep(4.0)  # let the active-expiry sweep reap 'dead' AND the 1s AOF flush timer sync it.
+                     # generous margin: under the full suite this server's event-loop tick (which
+                     # drives both the sweep and the flush) competes for CPU with ~8 other
+                     # coverage-instrumented servers, so a tight window flakes.
     stop_server(p)
 
     data = open(aof, "rb").read()

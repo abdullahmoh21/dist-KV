@@ -2,6 +2,7 @@
 #define REDIS_OBJECT_H
 
 #include <stddef.h>
+#include <stdint.h>
 typedef struct SkipList SkipList;
 typedef struct HashMap HashMap;
 
@@ -11,11 +12,12 @@ typedef enum {
 } RS_ObjType;
 
 typedef struct RedisObject {
-    RS_ObjType type; 
-    char *key;       
+    RS_ObjType type;
+    char *key;
     size_t key_len;
-    void *data;    // either KV value or pointer to ZSet  
+    void *data;    // either KV value or pointer to ZSet
     size_t data_len;
+    uint64_t expire_at_ms; // absolute Unix-epoch ms deadline; 0 = no TTL (never expires)
 } RedisObject;
 
 typedef struct Zset {
