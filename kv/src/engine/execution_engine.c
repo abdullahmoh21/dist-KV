@@ -13,11 +13,18 @@ ExecuteResult exec_incr(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_decr(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_incrby(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_decrby(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_expire(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_pexpire(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_pexpireat(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_ttl(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_pttl(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_persist(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_zadd(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_zscore(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_zrem(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_zrange(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_zpopmin(int clientfd, RedisCommand *command, RedisStore *store);
+ExecuteResult exec_bzpopmin(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_ping(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_flush(int clientfd, RedisCommand *command, RedisStore *store);
 ExecuteResult exec_wait(int clientfd, RedisCommand *command, RedisStore *store);
@@ -32,12 +39,20 @@ static struct CommandEntry commandTable[] = {
 
     // Key/Value Operations
     {"get",       3,   2,    CMD_FLAG_READONLY | CMD_FLAG_FAST,          1,    1,   1,    exec_get},
-    {"set",       3,   3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_set},
+    {"set",       3,  -3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_set},
     {"del",       3,  -2,    CMD_FLAG_WRITE,                             1,   -1,   1,    exec_del},
     {"incr",      4,   2,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_incr},
     {"decr",      4,   2,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_decr},
     {"incrby",    6,   3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_incrby},
     {"decrby",    6,   3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_decrby},
+
+    // Expiry / TTL Operations
+    {"expire",    6,   3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_expire},
+    {"pexpire",   7,   3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_pexpire},
+    {"pexpireat", 9,   3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_pexpireat},
+    {"ttl",       3,   2,    CMD_FLAG_READONLY | CMD_FLAG_FAST,          1,    1,   1,    exec_ttl},
+    {"pttl",      4,   2,    CMD_FLAG_READONLY | CMD_FLAG_FAST,          1,    1,   1,    exec_pttl},
+    {"persist",   7,   2,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_persist},
 
     // Sorted Set (ZSet) Operations
     {"zadd",      4,  -4,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_zadd},
@@ -45,6 +60,8 @@ static struct CommandEntry commandTable[] = {
     {"zrem",      4,  -3,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_zrem},
     {"zrange",    6,  -4,    CMD_FLAG_READONLY,                          1,    1,   1,    exec_zrange},
     {"zpopmin",   7,  -2,    CMD_FLAG_WRITE | CMD_FLAG_FAST,             1,    1,   1,    exec_zpopmin},
+    // last_key -2: the trailing arg is a timeout, not a key.
+    {"bzpopmin",  8,  -3,    CMD_FLAG_WRITE,                             1,   -2,   1,    exec_bzpopmin},
 
     // Administrative / Utility Commands
     {"ping",      4,   1,    CMD_FLAG_FAST,                              0,    0,   0,    exec_ping},

@@ -104,6 +104,15 @@ ExecuteResult sendArrayHeader(int clientfd, int count) {
     return _sendRaw(clientfd, h_buff, h_len);
 }
 
+// RESP2 null array ("*-1\r\n") — distinct from the empty array "*0\r\n".
+// Used by BZPOPMIN to signal "timed out, nothing claimed".
+ExecuteResult sendNullArray(int clientfd) {
+    if (clientfd == -1) {
+        return EE_OK;
+    }
+    return _sendRaw(clientfd, "*-1\r\n", 5);
+}
+
 ExecuteResult sendBulkString(int clientfd, const char *data, size_t data_len) {
     if (clientfd == -1) {
         return EE_OK;
